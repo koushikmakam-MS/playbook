@@ -63,6 +63,11 @@ param(
     [int]$RetryBaseDelay = 30,
     [int]$CallTimeout = 300,
     [int]$BatchSize = 5,
+
+    [switch]$Incremental,
+
+    [string]$Since,
+
     [switch]$ShowVerbose,
     [string[]]$IncludeGlob,
     [string[]]$ExcludePattern = @(),
@@ -638,6 +643,29 @@ if ($scanFiles.Count -eq 0) {
 Write-Host "  📁 Found $($scanFiles.Count) source files to scan" -ForegroundColor DarkGray
 
 $fileRisks = Invoke-RiskScan -Files $scanFiles -WorkDir $workDir
+
+# Incremental filter
+if ($Incremental -or $Since) {
+    $sinceRef = $Since
+    if (-not $sinceRef) {
+        $lastState = Get-IncrementalState -WorkingDirectory $workDir
+        if ($lastState) {
+            $sinceRef = $lastState.CommitHash
+            Write-Step "Incremental: using last run commit $sinceRef" "INFO"
+        }
+        else {
+            Write-Step "No prior run found — running full" "WARN"
+        }
+    }
+    if ($sinceRef) {
+        $changedFiles = Get-ChangedFiles -WorkingDirectory $workDir -Since $sinceRef
+        $fileRisks = @($fileRisks | Where-Object { $_.File -in $changedFiles })
+        if ($fileRisks.Count -eq 0) {
+            Write-Step "No risky files changed — nothing to do" "OK"
+            exit 0
+        }
+    }
+}
 
 if ($fileRisks.Count -eq 0) {
     Write-Host ""

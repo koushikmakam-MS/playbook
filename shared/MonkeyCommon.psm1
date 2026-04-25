@@ -412,6 +412,167 @@ Remember: Start each answer with >>> ANSWER [$batchId-<N>] <<< and end with >>> 
 }
 
 # ─────────────────────────────────────────────
+# Region: Incremental Mode
+# ─────────────────────────────────────────────
+
+function Get-IncrementalState {
+    <#
+    .SYNOPSIS
+        Reads the last-run state for incremental mode.
+        Returns $null if no prior run exists.
+    #>
+    param([string]$WorkingDirectory)
+    $statePath = Join-Path $WorkingDirectory ".playbook-state" "last-run.json"
+    if (Test-Path $statePath) {
+        try {
+            return Get-Content $statePath -Raw | ConvertFrom-Json
+        }
+        catch {
+            Write-Step "Corrupt incremental state — treating as full run" "WARN"
+            return $null
+        }
+    }
+    return $null
+}
+
+function Save-IncrementalState {
+    <#
+    .SYNOPSIS
+        Saves the current run state for future incremental runs.
+        Writes atomically (temp + rename).
+    #>
+    param(
+        [string]$WorkingDirectory,
+        [string]$MonkeyName,
+        [string]$CommitHash,
+        [int]$EntryPointCount,
+        [int]$QuestionsAsked
+    )
+    $stateDir = Join-Path $WorkingDirectory ".playbook-state"
+    New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+
+    $state = @{
+        LastRunAt      = (Get-Date).ToString('o')
+        MonkeyName     = $MonkeyName
+        CommitHash     = $CommitHash
+        EntryPoints    = $EntryPointCount
+        QuestionsAsked = $QuestionsAsked
+    }
+
+    $statePath = Join-Path $stateDir "last-run.json"
+    $tmpPath = "$statePath.tmp"
+    $state | ConvertTo-Json -Depth 3 | Set-Content $tmpPath -Encoding UTF8
+    Move-Item $tmpPath $statePath -Force
+}
+
+function Get-ChangedFiles {
+    <#
+    .SYNOPSIS
+        Returns file paths changed since a given commit or date.
+        Used by incremental mode to filter entry points to only changed files.
+    .PARAMETER WorkingDirectory
+        The repo root.
+    .PARAMETER Since
+        A git ref (commit hash, branch, tag) or date string (e.g., "2024-01-01", "3 days ago").
+    .PARAMETER FileGlobs
+        Optional glob patterns to filter results (e.g., "*.cs", "*.py").
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$WorkingDirectory,
+
+        [Parameter(Mandatory)]
+        [string]$Since,
+
+        [string[]]$FileGlobs
+    )
+
+    Push-Location $WorkingDirectory
+    try {
+        # Try as commit ref first
+        $files = & git --no-pager diff --name-only "$Since" HEAD 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            # Try as date
+            $files = & git --no-pager log --since="$Since" --name-only --pretty=format:"" HEAD 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Write-Step "Could not resolve --since='$Since' as ref or date" "ERROR"
+                return @()
+            }
+        }
+
+        # Deduplicate and filter
+        $changedFiles = @($files | Where-Object { $_ -and $_.Trim() } | Sort-Object -Unique)
+
+        if ($FileGlobs -and $FileGlobs.Count -gt 0) {
+            $filtered = @()
+            foreach ($f in $changedFiles) {
+                foreach ($glob in $FileGlobs) {
+                    if ($f -like $glob) {
+                        $filtered += $f
+                        break
+                    }
+                }
+            }
+            $changedFiles = $filtered
+        }
+
+        Write-Step "Incremental: $($changedFiles.Count) files changed since '$Since'" "INFO"
+        return $changedFiles
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+function Select-IncrementalEntryPoints {
+    <#
+    .SYNOPSIS
+        Filters a list of entry points to only those whose files have changed.
+        Entry points have a .Path or .RelPath property.
+    .PARAMETER EntryPoints
+        Array of entry point hashtables with Path/RelPath keys.
+    .PARAMETER ChangedFiles
+        Array of relative file paths from Get-ChangedFiles.
+    .PARAMETER WorkingDirectory
+        Repo root for path normalization.
+    #>
+    param(
+        [array]$EntryPoints,
+        [array]$ChangedFiles,
+        [string]$WorkingDirectory
+    )
+
+    if (-not $ChangedFiles -or $ChangedFiles.Count -eq 0) {
+        Write-Step "No changed files — skipping all entry points" "WARN"
+        return @()
+    }
+
+    # Normalize changed files to forward-slash for comparison
+    $changedSet = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($f in $ChangedFiles) {
+        [void]$changedSet.Add($f.Replace('\', '/').TrimStart('/'))
+    }
+
+    $filtered = @()
+    foreach ($ep in $EntryPoints) {
+        $relPath = if ($ep.RelPath) { $ep.RelPath } else {
+            $ep.Path.Substring($WorkingDirectory.Length + 1)
+        }
+        $normalized = $relPath.Replace('\', '/').TrimStart('/')
+
+        if ($changedSet.Contains($normalized)) {
+            $filtered += $ep
+        }
+    }
+
+    $skipped = $EntryPoints.Count - $filtered.Count
+    Write-Step "Incremental filter: $($filtered.Count) changed, $skipped unchanged (skipped)" "OK"
+    return $filtered
+}
+
+# ─────────────────────────────────────────────
 # Region: Doc-Reference Parsing
 # ─────────────────────────────────────────────
 
@@ -1840,6 +2001,10 @@ Export-ModuleMember -Function @(
     'Get-QuestionId'
     'Get-BatchCheckpoint'
     'Save-BatchCheckpoint'
+    'Get-IncrementalState'
+    'Save-IncrementalState'
+    'Get-ChangedFiles'
+    'Select-IncrementalEntryPoints'
     'Get-DocReferences'
     'Invoke-MonkeySetup'
     'Test-Preflight'

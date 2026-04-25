@@ -33,6 +33,12 @@ param(
     [int]$MaxRetries = 3,
     [int]$RetryBaseDelay = 30,
     [int]$CallTimeout = 300,
+    [int]$BatchSize = 5,
+
+    [switch]$Incremental,
+
+    [string]$Since,
+
     [switch]$ShowVerbose,
 
     # Internal mode (called by orchestrator — skips setup/commit)
@@ -409,6 +415,31 @@ function Start-Marcel {
 
         # Phase 2: Discovery — find stale docs
         $docAnalysis = Invoke-Discovery -WorkDir $workDir
+
+        # Incremental filter
+        if ($Incremental -or $Since) {
+            $sinceRef = $Since
+            if (-not $sinceRef) {
+                $lastState = Get-IncrementalState -WorkingDirectory $workDir
+                if ($lastState) {
+                    $sinceRef = $lastState.CommitHash
+                    Write-Step "Incremental: using last run commit $sinceRef" "INFO"
+                }
+                else {
+                    Write-Step "No prior run found — running full" "WARN"
+                }
+            }
+            if ($sinceRef) {
+                $changedFiles = Get-ChangedFiles -WorkingDirectory $workDir -Since $sinceRef
+                $docAnalysis = @($docAnalysis | Where-Object { $_.DocFile -in $changedFiles })
+                if ($docAnalysis.Count -eq 0) {
+                    Write-Step "No stale docs in changed files — nothing to do" "OK"
+                    $duration = (Get-Date) - $startTime
+                    return New-MonkeyResult -MonkeyName $script:MONKEY_NAME -Duration $duration `
+                        -Model $script:SelectedModel -ExitStatus 'SUCCESS' -QuestionsAsked 0 -QuestionsAnswered 0
+                }
+            }
+        }
 
         if ($docAnalysis.Count -eq 0) {
             Write-Step "No stale documentation found! All references are current. 🎉" "OK"
