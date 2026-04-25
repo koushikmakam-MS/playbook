@@ -234,6 +234,184 @@ function Invoke-CopilotWithRetry {
 }
 
 # ─────────────────────────────────────────────
+# Region: Batch Execution
+# ─────────────────────────────────────────────
+
+function Get-QuestionId {
+    <#
+    .SYNOPSIS
+        Generates a stable hash-based ID for a question (EntryPoint + Question text).
+        Used for checkpoint tracking — survives reordering and filtering.
+    #>
+    param(
+        [string]$EntryPoint,
+        [string]$Question
+    )
+    $raw = "$EntryPoint|$Question"
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($raw)
+    $hash = $sha.ComputeHash($bytes)
+    return [BitConverter]::ToString($hash[0..7]).Replace('-', '').ToLower()
+}
+
+function Get-BatchCheckpoint {
+    <#
+    .SYNOPSIS
+        Reads the batch checkpoint file. Returns a set of completed question IDs.
+    #>
+    param([string]$OutputPath)
+    $cpPath = Join-Path $OutputPath "batch-checkpoint.json"
+    if (Test-Path $cpPath) {
+        try {
+            $data = Get-Content $cpPath -Raw | ConvertFrom-Json
+            $set = [System.Collections.Generic.HashSet[string]]::new()
+            foreach ($id in $data.CompletedIds) { [void]$set.Add($id) }
+            return $set
+        }
+        catch {
+            Write-Step "Corrupt checkpoint — starting fresh" "WARN"
+            return [System.Collections.Generic.HashSet[string]]::new()
+        }
+    }
+    return [System.Collections.Generic.HashSet[string]]::new()
+}
+
+function Save-BatchCheckpoint {
+    <#
+    .SYNOPSIS
+        Atomically writes the batch checkpoint file (temp + rename).
+    #>
+    param(
+        [string]$OutputPath,
+        [System.Collections.Generic.HashSet[string]]$CompletedIds
+    )
+    $cpPath = Join-Path $OutputPath "batch-checkpoint.json"
+    $tmpPath = "$cpPath.tmp"
+    $data = @{
+        CompletedIds = @($CompletedIds)
+        LastUpdated  = (Get-Date).ToString('o')
+        Count        = $CompletedIds.Count
+    }
+    $data | ConvertTo-Json -Depth 3 | Set-Content $tmpPath -Encoding UTF8
+    Move-Item $tmpPath $cpPath -Force
+}
+
+function Invoke-CopilotBatch {
+    <#
+    .SYNOPSIS
+        Sends a batch of questions to a single copilot CLI call.
+        Uses GUID-based delimiters for reliable parsing.
+        Returns per-question results array.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [array]$Questions,
+
+        [string]$WorkingDirectory,
+        [string]$OutputPath,
+        [string]$ModelName,
+        [string]$SharePath,
+        [int]$Retries = 2,
+        [int]$BaseDelay = 30,
+        [int]$TimeoutPerQuestion = 180,
+        [switch]$ShowVerbose
+    )
+
+    $batchId = [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $totalTimeout = $Questions.Count * $TimeoutPerQuestion
+
+    # Build the mega-prompt with questions embedded directly
+    $questionBlock = ""
+    foreach ($q in $Questions) {
+        $idx = $q.BatchIndex
+        $ep = if ($q.EntryPoint) { " (file: $($q.EntryPoint))" } else { "" }
+        $docHealSuffix = " If relevant documentation for this topic is missing or incomplete in the repo, create or update it following existing doc patterns."
+        $questionBlock += @"
+
+--- QUESTION [$batchId-$idx] ---
+$($q.Question)${ep}${docHealSuffix}
+
+"@
+    }
+
+    $megaPrompt = @"
+You have $($Questions.Count) questions to answer about this codebase. Answer each one in order.
+
+IMPORTANT: Before each answer, output exactly this marker on its own line:
+>>> ANSWER [$batchId-<N>] <<<
+where <N> is the question number shown below. After your last answer, output:
+>>> BATCH DONE [$batchId] <<<
+
+Here are the questions:
+$questionBlock
+Remember: Start each answer with >>> ANSWER [$batchId-<N>] <<< and end with >>> BATCH DONE [$batchId] <<<
+"@
+
+    Write-Step "Batch ${batchId}: $($Questions.Count) questions, timeout ${totalTimeout}s" "INFO"
+
+    $result = Invoke-CopilotWithRetry `
+        -Prompt $megaPrompt `
+        -ModelName $ModelName `
+        -SharePath $SharePath `
+        -WorkingDirectory $WorkingDirectory `
+        -Retries $Retries `
+        -BaseDelay $BaseDelay `
+        -Timeout $totalTimeout `
+        -ShowVerbose:$ShowVerbose
+
+    # Parse results — even partial output is valuable
+    $questionResults = @()
+    $rawOutput = if ($result.Success) { $result.Output } else { $result.Output }
+    $batchComplete = $rawOutput -match ">>> BATCH DONE \[$batchId\] <<<"
+
+    foreach ($q in $Questions) {
+        $idx = $q.BatchIndex
+        $startMarker = ">>> ANSWER \[$batchId-$idx\] <<<"
+        $nextIdx = $idx + 1
+        $endMarker = ">>> ANSWER \[$batchId-$nextIdx\] <<<"
+
+        # Try to extract this question's answer
+        $answer = $null
+        if ($rawOutput -match "(?s)$startMarker(.+?)(?:$endMarker|>>> BATCH DONE)") {
+            $answer = $Matches[1].Trim()
+        }
+        elseif ($rawOutput -match "(?s)$startMarker(.+)$") {
+            # Last question or truncated — grab everything after marker
+            $answer = $Matches[1] -replace ">>> BATCH DONE.*$", "" | ForEach-Object { $_.Trim() }
+        }
+
+        $questionResults += @{
+            QuestionId  = $q.QuestionId
+            BatchIndex  = $idx
+            EntryPoint  = $q.EntryPoint
+            Question    = $q.Question
+            Category    = $q.Category
+            Success     = ($null -ne $answer -and $answer.Length -gt 20)
+            Output      = if ($answer) { $answer } else { "" }
+            Error       = if (-not $answer) { "No answer parsed from batch output" } else { $null }
+        }
+    }
+
+    $parsed = @($questionResults | Where-Object { $_.Success }).Count
+    $batchStatus = if ($batchComplete -and $parsed -eq $Questions.Count) { "COMPLETE" }
+                   elseif ($parsed -gt 0) { "PARTIAL" }
+                   else { "FAILED" }
+
+    Write-Step "Batch ${batchId}: ${batchStatus} — ${parsed}/$($Questions.Count) parsed" $(
+        switch ($batchStatus) { "COMPLETE" { "OK" } "PARTIAL" { "WARN" } "FAILED" { "ERROR" } }
+    )
+
+    return @{
+        BatchId         = $batchId
+        Status          = $batchStatus
+        QuestionResults = $questionResults
+        RawOutput       = $rawOutput
+        Retries         = $result.Retries
+        BatchComplete   = $batchComplete
+    }
+}
+
+# ─────────────────────────────────────────────
 # Region: Doc-Reference Parsing
 # ─────────────────────────────────────────────
 
@@ -637,6 +815,9 @@ function Invoke-MonkeyQuestions {
     <#
     .SYNOPSIS
         Shared Phase 4: feeds questions to copilot, tracks doc refs + file changes per answer.
+        Supports batch mode (multiple questions per CLI call) with automatic fallback to single mode.
+    .PARAMETER BatchSize
+        Number of questions per batch. Default 5. Set to 0 or 1 for legacy single-question mode.
     #>
     param(
         [array]$Questions,
@@ -647,10 +828,13 @@ function Invoke-MonkeyQuestions {
         [int]$MaxRetries = 3,
         [int]$RetryBaseDelay = 30,
         [int]$CallTimeout = 300,
+        [int]$BatchSize = 5,
         [switch]$ShowVerbose
     )
 
-    Write-Phase "PHASE 4" "Execution — Asking Copilot ($($Questions.Count) questions)"
+    $useBatch = $BatchSize -ge 2
+    $modeLabel = if ($useBatch) { "batch mode (size=$BatchSize)" } else { "single mode" }
+    Write-Phase "PHASE 4" "Execution — Asking Copilot ($($Questions.Count) questions, $modeLabel)"
 
     $stats = @{
         Answered         = 0
@@ -660,123 +844,172 @@ function Invoke-MonkeyQuestions {
         DocGroundedCount = 0
         HealingQuestions = @()
         QuestionDetails  = @()
+        BatchesRun       = 0
+        BatchesFailed    = 0
+        FallbackSingles  = 0
     }
     $failedQuestions = @()
-    $totalQ = $Questions.Count
-    $currentQ = 0
 
+    # Assign stable IDs to each question
+    foreach ($q in $Questions) {
+        $q['QuestionId'] = Get-QuestionId -EntryPoint $q.EntryPoint -Question $q.Question
+    }
+
+    # Load checkpoint — skip already-completed questions
+    $completedIds = Get-BatchCheckpoint -OutputPath $OutputPath
+    if ($completedIds.Count -gt 0) {
+        $beforeCount = $Questions.Count
+        $Questions = @($Questions | Where-Object { -not $completedIds.Contains($_.QuestionId) })
+        Write-Step "Checkpoint: $($completedIds.Count) already done, $($Questions.Count)/$beforeCount remaining" "OK"
+    }
+
+    $totalQ = $Questions.Count
+    if ($totalQ -eq 0) {
+        Write-Step "All questions already completed (checkpoint)" "OK"
+        return $stats
+    }
+
+    New-Item -ItemType Directory -Path (Join-Path $OutputPath "session-logs") -Force | Out-Null
     Push-Location $WorkingDirectory
 
-    foreach ($q in $Questions) {
-        $currentQ++
-        $pct = [Math]::Round(($currentQ / $totalQ) * 100)
-        $entryLabel = if ($q.EntryPoint) { $q.EntryPoint } else { "general" }
-        Write-Progress -Activity "$MonkeyEmoji answering questions" -Status "$currentQ/$totalQ — $entryLabel" -PercentComplete $pct
+    try {
+        if ($useBatch) {
+            # ═══════════════════════════════════════════
+            # BATCH MODE
+            # ═══════════════════════════════════════════
+            $batches = [System.Collections.ArrayList]::new()
+            for ($i = 0; $i -lt $totalQ; $i += $BatchSize) {
+                $end = [Math]::Min($i + $BatchSize, $totalQ)
+                $batch = @($Questions[$i..($end - 1)])
+                # Assign batch-local indices
+                $bIdx = 0
+                foreach ($bq in $batch) { $bq['BatchIndex'] = ++$bIdx }
+                [void]$batches.Add($batch)
+            }
 
-        $beforeStatus = & git --no-pager status --porcelain 2>&1
+            $batchNum = 0
+            $processedQ = $completedIds.Count
 
-        # Build prompt — Abu may not always have an EntryPoint
-        $docHealSuffix = " If relevant documentation for this topic is missing or incomplete in the repo, create or update it following existing doc patterns."
-        $prompt = if ($q.EntryPoint) {
-            "Regarding the file '$($q.EntryPoint)': $($q.Question)$docHealSuffix"
-        } else {
-            "$($q.Question)$docHealSuffix"
-        }
+            foreach ($batch in $batches) {
+                $batchNum++
+                $processedQ += $batch.Count
+                $pct = [Math]::Round(($processedQ / ($totalQ + $completedIds.Count)) * 100)
+                Write-Progress -Activity "$MonkeyEmoji batch execution" -Status "Batch $batchNum/$($batches.Count) ($processedQ questions)" -PercentComplete $pct
 
-        $safeName = if ($q.EntryPoint) {
-            ($q.EntryPoint -replace '[\\/:*?"<>|]', '_') -replace '\.cs$|\.py$|\.java$|\.go$|\.ts$|\.js$', ''
-        } else {
-            "general_$currentQ"
-        }
-        $sharePath = Join-Path $OutputPath "session-logs" ("{0:D3}-{1}.md" -f $currentQ, $safeName)
+                $beforeStatus = & git --no-pager status --porcelain 2>&1
 
-        Write-Step "[$currentQ/$totalQ] $($q.Question.Substring(0, [Math]::Min(80, $q.Question.Length)))..." "INFO"
+                $sharePath = Join-Path $OutputPath "session-logs" ("batch-{0:D3}.md" -f $batchNum)
+                $batchResult = Invoke-CopilotBatch `
+                    -Questions $batch `
+                    -WorkingDirectory $WorkingDirectory `
+                    -OutputPath $OutputPath `
+                    -ModelName $ModelName `
+                    -SharePath $sharePath `
+                    -Retries $MaxRetries `
+                    -BaseDelay $RetryBaseDelay `
+                    -TimeoutPerQuestion $CallTimeout `
+                    -ShowVerbose:$ShowVerbose
 
-        $result = Invoke-CopilotWithRetry -Prompt $prompt -ModelName $ModelName -SharePath $sharePath -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout -ShowVerbose:$ShowVerbose
+                $stats.BatchesRun++
+                $stats.Retries += $batchResult.Retries
 
-        $stats.Retries += $result.Retries
+                # File changes at batch level
+                $afterStatus = & git --no-pager status --porcelain 2>&1
+                $batchFileChanges = @($afterStatus | Where-Object { $_ -notin $beforeStatus })
 
-        if ($result.Success) {
-            $stats.Answered++
+                if ($batchResult.Status -eq "FAILED") {
+                    # Entire batch failed — fall back to single-question mode for this batch
+                    $stats.BatchesFailed++
+                    Write-Step "Batch $batchNum failed — falling back to single mode for $($batch.Count) questions" "WARN"
 
-            # Signal 1: Doc-reference parsing
-            $docRefs = Get-DocReferences -ResponseText $result.Output
-            if ($docRefs.IsDocGrounded) { $stats.DocGroundedCount++ }
-
-            # Also parse transcript
-            if (Test-Path $sharePath) {
-                $transcript = Get-Content $sharePath -Raw -ErrorAction SilentlyContinue
-                if ($transcript) {
-                    $transcriptRefs = Get-DocReferences -ResponseText $transcript
-                    if ($transcriptRefs.IsDocGrounded -and -not $docRefs.IsDocGrounded) {
-                        $docRefs = $transcriptRefs
-                        $stats.DocGroundedCount++
+                    foreach ($q in $batch) {
+                        $stats.FallbackSingles++
+                        $singleResult = Invoke-SingleQuestion -Question $q -WorkingDirectory $WorkingDirectory -OutputPath $OutputPath -ModelName $ModelName -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -ShowVerbose:$ShowVerbose -Stats $stats -FailedQuestions ([ref]$failedQuestions) -GlobalIndex ($processedQ - $batch.Count + $q.BatchIndex)
+                        [void]$completedIds.Add($q.QuestionId)
                     }
-                    elseif ($transcriptRefs.IsDocGrounded) {
-                        $docRefs = $transcriptRefs
+                    Save-BatchCheckpoint -OutputPath $OutputPath -CompletedIds $completedIds
+                    continue
+                }
+
+                # Process each question result from the batch
+                foreach ($qr in $batchResult.QuestionResults) {
+                    if ($qr.Success) {
+                        $stats.Answered++
+                        $docRefs = Get-DocReferences -ResponseText $qr.Output
+                        if ($docRefs.IsDocGrounded) { $stats.DocGroundedCount++ }
+
+                        # File changes attributed at batch level
+                        $hasFileChanges = $batchFileChanges.Count -gt 0
+
+                        $verdict = switch ($true) {
+                            ($docRefs.IsDocGrounded -and $hasFileChanges) { "DOCS_REFERENCED+FILES_CHANGED" }
+                            ($docRefs.IsDocGrounded)                      { "DOCS_REFERENCED" }
+                            ($hasFileChanges)                             { "FILES_CHANGED" }
+                            default                                       { "NO_DOC_SIGNAL" }
+                        }
+
+                        $stats.QuestionDetails += @{
+                            Index        = $processedQ - $batch.Count + $qr.BatchIndex
+                            EntryPoint   = $qr.EntryPoint
+                            Question     = $qr.Question
+                            Category     = if ($qr.Category) { $qr.Category } else { 'general' }
+                            Verdict      = $verdict
+                            DocGrounded  = $docRefs.IsDocGrounded
+                            DocPaths     = $docRefs.DocPaths
+                            DocRefCount  = $docRefs.TotalRefs
+                            FileChanges  = 0  # batch-level — not per-question
+                            BatchMode    = $true
+                        }
+                        [void]$completedIds.Add($qr.QuestionId)
+                        Write-Step "  Q$($qr.BatchIndex) ✓ ($verdict)" "OK"
+                    }
+                    else {
+                        # Individual question failed in batch — retry as single
+                        $stats.FallbackSingles++
+                        Write-Step "  Q$($qr.BatchIndex) failed in batch — retrying single" "WARN"
+                        $origQ = $batch | Where-Object { $_.QuestionId -eq $qr.QuestionId }
+                        if ($origQ) {
+                            Invoke-SingleQuestion -Question $origQ -WorkingDirectory $WorkingDirectory -OutputPath $OutputPath -ModelName $ModelName -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -ShowVerbose:$ShowVerbose -Stats $stats -FailedQuestions ([ref]$failedQuestions) -GlobalIndex ($processedQ - $batch.Count + $qr.BatchIndex)
+                        }
+                        else {
+                            $stats.Failed++
+                        }
+                        [void]$completedIds.Add($qr.QuestionId)
                     }
                 }
-            }
 
-            # Signal 2: File changes
-            $afterStatus = & git --no-pager status --porcelain 2>&1
-            $newChanges = @($afterStatus | Where-Object { $_ -notin $beforeStatus })
-            $hasFileChanges = $newChanges.Count -gt 0
-
-            if ($hasFileChanges) {
-                $stats.FileChanges += $newChanges.Count
-                $stats.HealingQuestions += @{
-                    Question     = $q.Question
-                    EntryPoint   = $q.EntryPoint
-                    FilesChanged = $newChanges.Count
-                    Files        = @($newChanges | ForEach-Object { $_.Trim() })
+                # Record batch-level file changes
+                if ($batchFileChanges.Count -gt 0) {
+                    $stats.FileChanges += $batchFileChanges.Count
+                    $stats.HealingQuestions += @{
+                        Question     = "Batch $batchNum ($($batch.Count) questions)"
+                        EntryPoint   = ($batch | ForEach-Object { $_.EntryPoint } | Select-Object -Unique) -join ", "
+                        FilesChanged = $batchFileChanges.Count
+                        Files        = @($batchFileChanges | ForEach-Object { $_.Trim() })
+                    }
+                    Write-Step "Batch ${batchNum}: $($batchFileChanges.Count) file(s) changed (self-healing!)" "OK"
                 }
-            }
 
-            $verdict = switch ($true) {
-                ($docRefs.IsDocGrounded -and $hasFileChanges) { "DOCS_REFERENCED+FILES_CHANGED" }
-                ($docRefs.IsDocGrounded -and -not $hasFileChanges) { "DOCS_REFERENCED" }
-                (-not $docRefs.IsDocGrounded -and $hasFileChanges) { "FILES_CHANGED" }
-                default { "NO_DOC_SIGNAL" }
-            }
-
-            $stats.QuestionDetails += @{
-                Index        = $currentQ
-                EntryPoint   = $q.EntryPoint
-                Question     = $q.Question
-                Category     = if ($q.ContainsKey('Category')) { $q.Category } else { 'general' }
-                Verdict      = $verdict
-                DocGrounded  = $docRefs.IsDocGrounded
-                DocPaths     = $docRefs.DocPaths
-                DocRefCount  = $docRefs.TotalRefs
-                FileChanges  = $newChanges.Count
-            }
-
-            if ($hasFileChanges) {
-                Write-Step "Answered ✓ + $($newChanges.Count) file(s) changed (self-healing triggered!)" "OK"
-                foreach ($change in $newChanges | Select-Object -First 5) {
-                    Write-Host "      $change" -ForegroundColor Green
-                }
-            }
-            elseif ($docRefs.IsDocGrounded) {
-                Write-Step "Answered ✓ (refs $($docRefs.DocPaths.Count) docs — docs already complete)" "OK"
-            }
-            else {
-                Write-Step "Answered ✓ (no doc signal)" "WARN"
+                Save-BatchCheckpoint -OutputPath $OutputPath -CompletedIds $completedIds
             }
         }
         else {
-            $stats.Failed++
-            $failedQuestions += @{
-                EntryPoint = $q.EntryPoint
-                Question   = $q.Question
-                Error      = $result.Error
+            # ═══════════════════════════════════════════
+            # SINGLE MODE (legacy)
+            # ═══════════════════════════════════════════
+            $currentQ = 0
+            foreach ($q in $Questions) {
+                $currentQ++
+                Invoke-SingleQuestion -Question $q -WorkingDirectory $WorkingDirectory -OutputPath $OutputPath -ModelName $ModelName -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -ShowVerbose:$ShowVerbose -Stats $stats -FailedQuestions ([ref]$failedQuestions) -GlobalIndex $currentQ -TotalQ $totalQ -MonkeyEmoji $MonkeyEmoji
+                [void]$completedIds.Add($q.QuestionId)
+                Save-BatchCheckpoint -OutputPath $OutputPath -CompletedIds $completedIds
             }
-            Write-Step "FAILED: $($result.Error)" "ERROR"
         }
     }
+    finally {
+        Pop-Location
+    }
 
-    Pop-Location
     Write-Progress -Activity "$MonkeyEmoji answering questions" -Completed
 
     if ($failedQuestions.Count -gt 0) {
@@ -785,7 +1018,142 @@ function Invoke-MonkeyQuestions {
         Write-Step "$($failedQuestions.Count) failed questions saved to failed-questions.json" "WARN"
     }
 
+    # Batch summary
+    if ($useBatch) {
+        Write-Step "Batch summary: $($stats.BatchesRun) batches, $($stats.BatchesFailed) failed, $($stats.FallbackSingles) fallback singles" "INFO"
+    }
+
     return $stats
+}
+
+function Invoke-SingleQuestion {
+    <#
+    .SYNOPSIS
+        Executes a single question against copilot and updates stats.
+        Extracted to share between batch fallback and legacy single mode.
+    #>
+    param(
+        [hashtable]$Question,
+        [string]$WorkingDirectory,
+        [string]$OutputPath,
+        [string]$ModelName,
+        [int]$MaxRetries = 3,
+        [int]$RetryBaseDelay = 30,
+        [int]$CallTimeout = 300,
+        [switch]$ShowVerbose,
+        [hashtable]$Stats,
+        [ref]$FailedQuestions,
+        [int]$GlobalIndex = 0,
+        [int]$TotalQ = 0,
+        [string]$MonkeyEmoji = "🐵"
+    )
+
+    $q = $Question
+    if ($TotalQ -gt 0) {
+        $pct = [Math]::Round(($GlobalIndex / $TotalQ) * 100)
+        $entryLabel = if ($q.EntryPoint) { $q.EntryPoint } else { "general" }
+        Write-Progress -Activity "$MonkeyEmoji answering questions" -Status "$GlobalIndex/$TotalQ — $entryLabel" -PercentComplete $pct
+    }
+
+    $beforeStatus = & git --no-pager status --porcelain 2>&1
+
+    $docHealSuffix = " If relevant documentation for this topic is missing or incomplete in the repo, create or update it following existing doc patterns."
+    $prompt = if ($q.EntryPoint) {
+        "Regarding the file '$($q.EntryPoint)': $($q.Question)$docHealSuffix"
+    } else {
+        "$($q.Question)$docHealSuffix"
+    }
+
+    $safeName = if ($q.EntryPoint) {
+        ($q.EntryPoint -replace '[\\/:*?"<>|]', '_') -replace '\.cs$|\.py$|\.java$|\.go$|\.ts$|\.js$', ''
+    } else {
+        "general_$GlobalIndex"
+    }
+    $sharePath = Join-Path $OutputPath "session-logs" ("{0:D3}-{1}.md" -f $GlobalIndex, $safeName)
+
+    Write-Step "[$GlobalIndex] $($q.Question.Substring(0, [Math]::Min(80, $q.Question.Length)))..." "INFO"
+
+    $result = Invoke-CopilotWithRetry -Prompt $prompt -ModelName $ModelName -SharePath $sharePath -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout -ShowVerbose:$ShowVerbose
+
+    $Stats.Retries += $result.Retries
+
+    if ($result.Success) {
+        $Stats.Answered++
+
+        $docRefs = Get-DocReferences -ResponseText $result.Output
+        if ($docRefs.IsDocGrounded) { $Stats.DocGroundedCount++ }
+
+        # Also parse transcript
+        if (Test-Path $sharePath) {
+            $transcript = Get-Content $sharePath -Raw -ErrorAction SilentlyContinue
+            if ($transcript) {
+                $transcriptRefs = Get-DocReferences -ResponseText $transcript
+                if ($transcriptRefs.IsDocGrounded -and -not $docRefs.IsDocGrounded) {
+                    $docRefs = $transcriptRefs
+                    $Stats.DocGroundedCount++
+                }
+                elseif ($transcriptRefs.IsDocGrounded) {
+                    $docRefs = $transcriptRefs
+                }
+            }
+        }
+
+        $afterStatus = & git --no-pager status --porcelain 2>&1
+        $newChanges = @($afterStatus | Where-Object { $_ -notin $beforeStatus })
+        $hasFileChanges = $newChanges.Count -gt 0
+
+        if ($hasFileChanges) {
+            $Stats.FileChanges += $newChanges.Count
+            $Stats.HealingQuestions += @{
+                Question     = $q.Question
+                EntryPoint   = $q.EntryPoint
+                FilesChanged = $newChanges.Count
+                Files        = @($newChanges | ForEach-Object { $_.Trim() })
+            }
+        }
+
+        $verdict = switch ($true) {
+            ($docRefs.IsDocGrounded -and $hasFileChanges) { "DOCS_REFERENCED+FILES_CHANGED" }
+            ($docRefs.IsDocGrounded -and -not $hasFileChanges) { "DOCS_REFERENCED" }
+            (-not $docRefs.IsDocGrounded -and $hasFileChanges) { "FILES_CHANGED" }
+            default { "NO_DOC_SIGNAL" }
+        }
+
+        $Stats.QuestionDetails += @{
+            Index        = $GlobalIndex
+            EntryPoint   = $q.EntryPoint
+            Question     = $q.Question
+            Category     = if ($q.ContainsKey('Category')) { $q.Category } else { 'general' }
+            Verdict      = $verdict
+            DocGrounded  = $docRefs.IsDocGrounded
+            DocPaths     = $docRefs.DocPaths
+            DocRefCount  = $docRefs.TotalRefs
+            FileChanges  = $newChanges.Count
+            BatchMode    = $false
+        }
+
+        if ($hasFileChanges) {
+            Write-Step "Answered ✓ + $($newChanges.Count) file(s) changed (self-healing triggered!)" "OK"
+            foreach ($change in $newChanges | Select-Object -First 5) {
+                Write-Host "      $change" -ForegroundColor Green
+            }
+        }
+        elseif ($docRefs.IsDocGrounded) {
+            Write-Step "Answered ✓ (refs $($docRefs.DocPaths.Count) docs — docs already complete)" "OK"
+        }
+        else {
+            Write-Step "Answered ✓ (no doc signal)" "WARN"
+        }
+    }
+    else {
+        $Stats.Failed++
+        $FailedQuestions.Value += @{
+            EntryPoint = $q.EntryPoint
+            Question   = $q.Question
+            Error      = $result.Error
+        }
+        Write-Step "FAILED: $($result.Error)" "ERROR"
+    }
 }
 
 # ─────────────────────────────────────────────
@@ -1467,6 +1835,11 @@ Export-ModuleMember -Function @(
     'Write-Step'
     'Write-MonkeySummary'
     'Invoke-CopilotWithRetry'
+    'Invoke-CopilotBatch'
+    'Invoke-SingleQuestion'
+    'Get-QuestionId'
+    'Get-BatchCheckpoint'
+    'Save-BatchCheckpoint'
     'Get-DocReferences'
     'Invoke-MonkeySetup'
     'Test-Preflight'

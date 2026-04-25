@@ -35,6 +35,7 @@ param(
     [int]$MaxRetries = 3,
     [int]$RetryBaseDelay = 30,
     [int]$CallTimeout = 300,
+    [int]$BatchSize = 5,
     [switch]$ShowVerbose,
 
     # Internal mode (called by orchestrator — skips setup/commit)
@@ -318,7 +319,7 @@ function Start-DonkeyKong {
 
         $execStats = Invoke-MonkeyQuestions -Questions $questions -WorkingDirectory $workDir `
             -OutputPath $script:OutputPath -ModelName $script:SelectedModel -MonkeyEmoji $script:MONKEY_EMOJI `
-            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -ShowVerbose:$ShowVerbose
+            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -BatchSize $BatchSize -ShowVerbose:$ShowVerbose
 
         $filesChanged = 0
         if (-not $Internal) {

@@ -62,6 +62,7 @@ param(
     [int]$MaxRetries = 3,
     [int]$RetryBaseDelay = 30,
     [int]$CallTimeout = 300,
+    [int]$BatchSize = 5,
     [switch]$ShowVerbose,
     [string[]]$IncludeGlob,
     [string[]]$ExcludePattern = @(),
@@ -687,6 +688,7 @@ $results = Invoke-MonkeyQuestions `
     -MaxRetries $MaxRetries `
     -RetryBaseDelay $RetryBaseDelay `
     -CallTimeout $CallTimeout `
+    -BatchSize $BatchSize `
     -ShowVerbose:$ShowVerbose
 
 # ── Phase 5: Commit & Report ─────────────────────────────────────────
