@@ -73,7 +73,8 @@ param(
     [string[]]$TargetAgents,     # AI agents to score for (copilot, cursor, claude, etc.)
     [int]$BatchSize = 5,         # Questions per batch (0 = single mode)
     [switch]$Incremental,        # Only process changed files
-    [string]$Since               # Git ref or date for incremental mode
+    [string]$Since,              # Git ref or date for incremental mode
+    [switch]$Resume              # Resume from last checkpoint
 )
 
 $ErrorActionPreference = "Stop"
@@ -227,6 +228,7 @@ Write-Phase "SCORE" "Measuring repo health (before)"
 $beforeScore = Get-DocHealthScore -RepoPath $workDir -IncludeBonus -TargetAgents $config['TargetAgents']
 
 $results = @{}
+$resumedFromCheckpoint = $false
 $monkeyScripts = @{
     'playbook'       = 'playbook-runner.ps1'
     'rafiki'         = 'rafiki.ps1'
@@ -239,9 +241,131 @@ $monkeyScripts = @{
     'curious-george' = 'curious-george.ps1'
 }
 
+# ── Checkpoint / Resume detection ─────────────────────────────────
+$existingCheckpoint = Get-RunCheckpoint -OutputRoot $outputRoot
+$skipMonkeys = @{}  # monkeyId → $true for monkeys to skip on resume
+
+if ($existingCheckpoint) {
+    Show-RunCheckpointSummary -Checkpoint $existingCheckpoint
+
+    # Validate compatibility
+    $compat = Test-RunCheckpointCompatible -Checkpoint $existingCheckpoint `
+        -Model $selectedModel -Pack $config.Pack -BatchSize $BatchSize `
+        -Branch $branchName -WorkDir $workDir
+
+    if (-not $compat.Compatible) {
+        Write-Host "  ⚠️  Checkpoint is NOT compatible with current settings:" -ForegroundColor Yellow
+        foreach ($r in $compat.Reasons) { Write-Host "    → $r" -ForegroundColor Yellow }
+        Write-Host ""
+    }
+
+    $shouldResume = $false
+    if ($Resume) {
+        # Auto-resume if -Resume switch and compatible
+        if ($compat.Compatible) {
+            $shouldResume = $true
+            Write-Step "Auto-resuming from checkpoint (-Resume flag)" "OK"
+        } else {
+            Write-Step "Cannot auto-resume — checkpoint incompatible. Starting fresh." "WARN"
+        }
+    }
+    elseif (-not $NonInteractive) {
+        # Interactive prompt
+        if ($compat.Compatible) {
+            Write-Host "  Resume from this checkpoint?" -ForegroundColor Cyan
+            Write-Host "    [R] Resume  |  [F] Fresh start" -ForegroundColor DarkGray
+            $choice = Read-Host "  Choice (R/F)"
+            $shouldResume = ($choice -match '^[Rr]')
+        } else {
+            Write-Host "  Checkpoint found but incompatible. Starting fresh." -ForegroundColor Yellow
+            Write-Host "  Press Enter to continue or Ctrl+C to abort..." -ForegroundColor DarkGray
+            Read-Host | Out-Null
+        }
+    }
+    else {
+        # NonInteractive without Resume — fresh start (safe default)
+        Write-Step "Checkpoint found but -NonInteractive without -Resume. Starting fresh." "WARN"
+    }
+
+    if ($shouldResume) {
+        $resumedFromCheckpoint = $true
+        Write-Step "Resuming from checkpoint" "OK"
+
+        # Reload before score if saved
+        if ($existingCheckpoint.beforeScore) {
+            $beforeScore = $existingCheckpoint.beforeScore
+            Write-Step "Reusing saved before-score (grade: $($beforeScore.Grade))" "INFO"
+        }
+
+        # Mark completed monkeys for skip and restore their results
+        $monkeyData = $existingCheckpoint.monkeys
+        $monkeyProps = if ($monkeyData -is [hashtable]) { $monkeyData.Keys } else { $monkeyData.PSObject.Properties.Name }
+        foreach ($mId in $monkeyProps) {
+            $mState = if ($monkeyData -is [hashtable]) { $monkeyData[$mId] } else { $monkeyData.$mId }
+            if ($mState.status -eq 'complete' -and $mState.result) {
+                $skipMonkeys[$mId] = $true
+                # Restore result — convert PSCustomObject back to hashtable
+                $restored = @{}
+                foreach ($prop in $mState.result.PSObject.Properties) {
+                    $restored[$prop.Name] = $prop.Value
+                }
+                $results[$mId] = $restored
+            }
+            # in-progress monkeys will be re-run (not skipped)
+        }
+
+        $skipCount = $skipMonkeys.Count
+        $remainCount = $config.OrderedMonkeys.Count - $skipCount
+        Write-Step "Skipping $skipCount completed monkey(s), running $remainCount remaining" "INFO"
+    }
+    else {
+        # Fresh start — remove old checkpoint
+        Remove-RunCheckpoint -OutputRoot $outputRoot
+    }
+}
+
+# ── Initialize checkpoint for this run ────────────────────────────
+$runCheckpoint = @{
+    startedAt   = (Get-Date).ToString('o')
+    model       = $selectedModel
+    pack        = $config.Pack
+    batchSize   = $BatchSize
+    branch      = $branchName
+    repoPath    = $workDir
+    beforeScore = $beforeScore
+    monkeys     = @{}
+}
+
+# Pre-populate monkey states
+foreach ($monkey in $config.OrderedMonkeys) {
+    if ($skipMonkeys.ContainsKey($monkey.Id)) {
+        $runCheckpoint.monkeys[$monkey.Id] = @{
+            status      = 'complete'
+            completedAt = $existingCheckpoint.monkeys.($monkey.Id).completedAt
+            result      = $results[$monkey.Id]
+        }
+    } else {
+        $runCheckpoint.monkeys[$monkey.Id] = @{ status = 'pending' }
+    }
+}
+Save-RunCheckpoint -OutputRoot $outputRoot -CheckpointData $runCheckpoint
+
 foreach ($monkey in $config.OrderedMonkeys) {
     $monkeyId = $monkey.Id
     $monkeyScript = Join-Path $PSScriptRoot "monkey-army" $monkeyScripts[$monkeyId]
+
+    # ── Skip if already completed in checkpoint ──
+    if ($skipMonkeys.ContainsKey($monkeyId)) {
+        Write-Host ""
+        Write-Host "  ══════════════════════════════════════════" -ForegroundColor DarkCyan
+        Write-Host "  Phase $($monkey.Phase): $($monkey.Emoji) $($monkey.Name) — RESUMED (skipped)" -ForegroundColor DarkGreen
+        Write-Host "  ══════════════════════════════════════════" -ForegroundColor DarkCyan
+        $r = $results[$monkeyId]
+        if ($r) {
+            Write-Host "  → Previously: $($r.ExitStatus) ($($r.QuestionsAnswered)/$($r.QuestionsAsked) answered)" -ForegroundColor DarkGray
+        }
+        continue
+    }
 
     if (-not (Test-Path $monkeyScript)) {
         Write-Step "$($monkey.Emoji) $($monkey.Name) — script not found, SKIPPING" "WARN"
@@ -368,6 +492,11 @@ foreach ($monkey in $config.OrderedMonkeys) {
 
     # Run the monkey
     $monkeyStartTime = Get-Date
+
+    # ── Mark in-progress in checkpoint ──
+    $runCheckpoint.monkeys[$monkeyId] = @{ status = 'in-progress'; startedAt = (Get-Date).ToString('o') }
+    Save-RunCheckpoint -OutputRoot $outputRoot -CheckpointData $runCheckpoint
+
     try {
         $result = & $monkeyScript @monkeyParams
         if (-not $result -or $result -isnot [hashtable]) {
@@ -384,12 +513,28 @@ foreach ($monkey in $config.OrderedMonkeys) {
             default   { 'Red' }
         }
         Write-Host "  → $($monkey.Emoji) $($monkey.Name): $($result.ExitStatus) ($($result.QuestionsAnswered)/$($result.QuestionsAsked) answered, $($result.Duration))" -ForegroundColor $statusColor
+
+        # ── Save checkpoint after monkey completes ──
+        $runCheckpoint.monkeys[$monkeyId] = @{
+            status      = 'complete'
+            completedAt = (Get-Date).ToString('o')
+            result      = $result
+        }
+        Save-RunCheckpoint -OutputRoot $outputRoot -CheckpointData $runCheckpoint
     }
     catch {
         Write-Host "  → $($monkey.Emoji) $($monkey.Name): FAILED — $($_.Exception.Message)" -ForegroundColor Red
         $results[$monkeyId] = New-MonkeyResult -MonkeyName $monkey.Name `
             -Duration ((Get-Date) - $monkeyStartTime) -Model $selectedModel -ExitStatus 'FAILED' `
             -Errors @($_.Exception.Message)
+
+        # ── Save failed state in checkpoint ──
+        $runCheckpoint.monkeys[$monkeyId] = @{
+            status   = 'failed'
+            failedAt = (Get-Date).ToString('o')
+            error    = $_.Exception.Message
+        }
+        Save-RunCheckpoint -OutputRoot $outputRoot -CheckpointData $runCheckpoint
     }
 }
 
@@ -634,5 +779,14 @@ $unifiedReport | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $outputRoot "
 
 Write-Host ""
 Write-Host "  📁 Full report: $(Join-Path $outputRoot 'army-report.json')" -ForegroundColor Cyan
+
+# ── Clean up checkpoint on successful completion ──
+if ($gatePass) {
+    Remove-RunCheckpoint -OutputRoot $outputRoot
+    Write-Host "  🔖 Checkpoint cleared (run complete)" -ForegroundColor DarkGray
+} else {
+    Write-Host "  🔖 Checkpoint preserved (quality gate failed — use -Resume to retry)" -ForegroundColor Yellow
+}
+
 Write-Host "  🐒 Monkey Army mission complete!" -ForegroundColor Green
 Write-Host ""
