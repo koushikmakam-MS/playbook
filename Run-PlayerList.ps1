@@ -78,7 +78,9 @@ param(
     [int]$MaxRetries = 3,
     [int]$RetryBaseDelay = 30,
     [int]$CallTimeout = 300,
-    [int]$BatchSize = 5
+    [int]$BatchSize = 5,
+    [switch]$Incremental,
+    [string]$Since
 )
 
 $ErrorActionPreference = "Stop"
@@ -156,6 +158,7 @@ function Build-MonkeyArgs {
         QuestionsPerFile        = 'QuestionsPerFile'
         GeorgeQuestionsPerDomain = 'GeorgeQuestionsPerDomain'
         BatchSize               = 'BatchSize'
+        Since                   = 'Since'
     }
 
     foreach ($key in $paramMap.Keys) {
@@ -173,6 +176,7 @@ function Build-MonkeyArgs {
         HealMode      = 'HealMode'
         ShowVerbose   = 'ShowVerbose'
         ForcePlaybook = 'ForcePlaybook'
+        Incremental   = 'Incremental'
     }
     foreach ($key in $switchMap.Keys) {
         $targetParam = $switchMap[$key]

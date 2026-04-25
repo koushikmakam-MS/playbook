@@ -71,7 +71,9 @@ param(
     [switch]$ShowVerbose,
     [switch]$ForcePlaybook,      # Re-run playbook even if knowledge layer exists
     [string[]]$TargetAgents,     # AI agents to score for (copilot, cursor, claude, etc.)
-    [int]$BatchSize = 5          # Questions per batch (0 = single mode)
+    [int]$BatchSize = 5,         # Questions per batch (0 = single mode)
+    [switch]$Incremental,        # Only process changed files
+    [string]$Since               # Git ref or date for incremental mode
 )
 
 $ErrorActionPreference = "Stop"
@@ -294,6 +296,12 @@ foreach ($monkey in $config.OrderedMonkeys) {
     # BatchSize is common to all prompt-mode monkeys
     if ($BatchSize -and $monkeyId -notin @('playbook', 'curious-george')) {
         $monkeyParams.BatchSize = $BatchSize
+    }
+
+    # Incremental mode is common to all prompt-mode monkeys
+    if ($Incremental -and $monkeyId -notin @('playbook', 'curious-george')) {
+        $monkeyParams.Incremental = $true
+        if ($Since) { $monkeyParams.Since = $Since }
     }
 
     # Add monkey-specific params

@@ -1575,7 +1575,8 @@ function Get-ArmyConfig {
         [string]$GeorgeFixMode,
         [string]$GeorgeDiscoveryMode,
         # ── Behavior ──
-        [switch]$NonInteractive
+        [switch]$NonInteractive,
+        [int]$BatchSize = 5
     )
 
     $config = @{}
@@ -1829,6 +1830,9 @@ function Get-ArmyConfig {
             $config.QuestionsPerFile = if ($qpf -match '^\d+$') { [int]$qpf } else { 5 }
         }
         else { $config.QuestionsPerFile = 5 }
+
+        # BatchSize
+        $config.BatchSize = if ($BatchSize -gt 0) { $BatchSize } else { 5 }
 
         Write-Step "Tuning: Rafiki=$($config.QuestionsPerEntry)/entry, Abu=$($config.QuestionsPerGap)/gap, Mojo=$($config.QuestionsPerFile)/file, Batch=$($config.BatchSize)" "OK"
     }
