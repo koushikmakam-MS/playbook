@@ -81,7 +81,8 @@ param(
     [int]$BatchSize = 5,
     [switch]$Incremental,
     [string]$Since,
-    [switch]$Resume
+    [switch]$Resume,
+    [switch]$CleanStart
 )
 
 $ErrorActionPreference = "Stop"
@@ -179,6 +180,7 @@ function Build-MonkeyArgs {
         ForcePlaybook = 'ForcePlaybook'
         Incremental   = 'Incremental'
         Resume        = 'Resume'
+        CleanStart    = 'CleanStart'
     }
     foreach ($key in $switchMap.Keys) {
         $targetParam = $switchMap[$key]
