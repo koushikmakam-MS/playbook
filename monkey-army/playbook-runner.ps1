@@ -85,7 +85,7 @@ $script:MONKEY_NAME    = "Playbook"
 $script:MONKEY_EMOJI   = "📋"
 $script:MONKEY_VERSION = "1.0.0"
 $script:MONKEY_TAGLINE = "Knowledge Layer Generator"
-$script:PROMPT_FILE    = "playbook-v2.9.txt"
+$script:PROMPT_FILE    = "playbook.txt"
 $script:OUTPUT_DIR     = ".monkey-output"
 
 # ── Banner ───────────────────────────────────────────────────────────

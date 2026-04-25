@@ -116,7 +116,7 @@ your-repo/
 
 ## How It Works
 
-The Playbook is a **75KB mega-prompt** (`prompts/playbook-v2.9.txt`) executed in Copilot agent mode. It runs 7 phases sequentially:
+The Playbook is a **75KB mega-prompt** (`prompts/playbook.txt`) executed in Copilot agent mode. It runs 7 phases sequentially:
 
 ```mermaid
 flowchart LR
@@ -172,7 +172,7 @@ Skip signals checked:
 ### Manual (paste prompts directly)
 
 1. Open Copilot Chat in **agent mode**
-2. Paste prompts from `prompts/playbook-v2.9.txt` phase by phase
+2. Paste prompts from `prompts/playbook.txt` phase by phase
 3. Replace `{DOCS_ROOT}` and `{SKILLS_ROOT}` with your paths
 
 ## Estimated Time
@@ -239,7 +239,7 @@ flowchart LR
 | File | Description |
 |------|-------------|
 | `monkey-army/playbook-runner.ps1` | PowerShell wrapper that launches the Playbook in agent mode |
-| `prompts/playbook-v2.9.txt` | The 75KB mega-prompt (7 phases) |
+| `prompts/playbook.txt` | The 75KB mega-prompt (7 phases) |
 | `prompts/curious-george-prompt.md` | Companion prompt for Phase 8 deep auditing |
 
 ---

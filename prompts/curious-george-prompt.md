@@ -19,7 +19,7 @@ answered, it runs fully autonomously.
 | # | Question | Example Answer |
 |---|----------|---------------|
 | 1 | How many questions per domain? | `5` |
-| 2 | Focus area? (blank = all domains) | `DPP` or blank |
+| 2 | Focus area? (blank = all domains) | `Auth` or blank |
 | 3 | Difficulty? (basic / intermediate / deep) | `deep` |
 | 4 | Max consecutive covered before skipping domain? | `3` |
 | 5 | Auto-fix gaps? (yes / dry-run) | `yes` |
@@ -54,7 +54,7 @@ human response. You run the full loop autonomously.
 BEFORE YOU START, ask me these questions ONE AT A TIME:
 
   1. How many questions per domain? (number, default: 5)
-  2. Focus area? (blank = all domains, or specify like "DPP", "RSV")
+  2. Focus area? (blank = all domains, or specify like "Auth", "Orders")
   3. Difficulty? (basic / intermediate / deep)
   4. Max consecutive ✅ before skipping to next domain? (default: 3)
   5. Auto-fix gaps? (yes = edit docs, dry-run = report only)
@@ -107,8 +107,8 @@ Then RUN the autonomous loop — no more human interaction needed:
     Doc Type = "workflow" | "design" | "reference"
 
   STEP 2 — SCAN EXISTING DOCS:
-  - List ALL workflow docs in DOCS_ROOT/DPP/workflows/ and
-    DOCS_ROOT/RSV/workflows/
+  - List ALL workflow docs in DOCS_ROOT subdirectories (e.g.,
+    DOCS_ROOT/{domain}/workflows/)
   - For each doc, extract which controllers it covers (from the
     "Controllers Covered" section or API endpoints table).
   - Build a DOC COVERAGE MAP: controller → doc file (or "NONE").
@@ -156,8 +156,8 @@ Then RUN the autonomous loop — no more human interaction needed:
     | Controller | Current Domain | Algorithm Domain | Match? | Action |
 
 DOMAIN DISCOVERY (builds roster for Pass 1+2):
-  - List ALL workflow docs in DOCS_ROOT/DPP/workflows/ and
-    DOCS_ROOT/RSV/workflows/ (INCLUDING any just created in Pass 0)
+  - List ALL workflow docs in DOCS_ROOT subdirectories (e.g.,
+    DOCS_ROOT/{domain}/workflows/) (INCLUDING any just created in Pass 0)
     plus shared docs (Architecture_Memory, ErrorCode_Reference,
     Telemetry_Reference, Glossary, Code_Exemplars)
   - Build a DOMAIN ROSTER: one entry per workflow doc = one domain
@@ -410,7 +410,7 @@ ANTI-SHORTCUT GUARDRAILS (mandatory — never skip these):
   undocumented controllers AND audits all existing docs.
 - **Gap chasing**: In Pass 2, the monkey follows up on gaps with related questions.
   Set consecutive-skip to `5` for thorough depth per domain.
-- **Targeted runs**: Set focus area to a single domain (e.g., "DPP/02") to skip
+- **Targeted runs**: Set focus area to a single domain (e.g., "Auth/02") to skip
   Pass 0+1 and go straight to exhaustive depth drilling.
 - **Pre-PR**: Run `audit-only` with `10` `deep` questions on the changed domain.
 - **Dry-run first**: Use `dry-run` mode to see what gaps exist before committing fixes.
