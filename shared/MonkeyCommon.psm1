@@ -266,14 +266,14 @@ function Get-BatchCheckpoint {
             $data = Get-Content $cpPath -Raw | ConvertFrom-Json
             $set = [System.Collections.Generic.HashSet[string]]::new()
             foreach ($id in $data.CompletedIds) { [void]$set.Add($id) }
-            return $set
+            return , $set
         }
         catch {
             Write-Step "Corrupt checkpoint — starting fresh" "WARN"
-            return [System.Collections.Generic.HashSet[string]]::new()
+            return , [System.Collections.Generic.HashSet[string]]::new()
         }
     }
-    return [System.Collections.Generic.HashSet[string]]::new()
+    return , [System.Collections.Generic.HashSet[string]]::new()
 }
 
 function Save-BatchCheckpoint {
