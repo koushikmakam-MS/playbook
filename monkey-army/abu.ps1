@@ -98,6 +98,12 @@ param(
 
     [int]$CallTimeout = 300,
 
+    [int]$BatchSize = 5,
+
+    [switch]$Incremental,
+
+    [string]$Since,
+
     [switch]$ShowVerbose,
 
     # Internal mode (called by orchestrator — skips setup/commit)
@@ -573,6 +579,31 @@ function Start-Abu {
         # Phase 3: Gap Analysis
         $gaps = Find-DocGaps -RootDir $workDir -DocStructure $docStructure -WorkingDirectory $workDir
 
+        # Incremental filter
+        if ($Incremental -or $Since) {
+            $sinceRef = $Since
+            if (-not $sinceRef) {
+                $lastState = Get-IncrementalState -WorkingDirectory $workDir
+                if ($lastState) {
+                    $sinceRef = $lastState.CommitHash
+                    Write-Step "Incremental: using last run commit $sinceRef" "INFO"
+                }
+                else {
+                    Write-Step "No prior run found — running full" "WARN"
+                }
+            }
+            if ($sinceRef) {
+                $changedFiles = Get-ChangedFiles -WorkingDirectory $workDir -Since $sinceRef
+                $gaps = @($gaps | Where-Object { $_.Target -in $changedFiles })
+                if ($gaps.Count -eq 0) {
+                    Write-Step "No gaps in changed files — nothing to do" "OK"
+                    $duration = (Get-Date) - $startTime
+                    return New-MonkeyResult -MonkeyName $script:MONKEY_NAME -Duration $duration `
+                        -Model $script:SelectedModel -ExitStatus 'SUCCESS' -QuestionsAsked 0 -QuestionsAnswered 0
+                }
+            }
+        }
+
         if ($gaps.Count -eq 0) {
             Write-Step "No documentation gaps found! 🎉" "OK"
             $duration = (Get-Date) - $startTime
@@ -592,7 +623,7 @@ function Start-Abu {
         # Phase 4: Execution (shared)
         $execStats = Invoke-MonkeyQuestions -Questions $questions -WorkingDirectory $workDir `
             -OutputPath $script:OutputPath -ModelName $script:SelectedModel -MonkeyEmoji $script:MONKEY_EMOJI `
-            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -ShowVerbose:$ShowVerbose
+            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -BatchSize $BatchSize -ShowVerbose:$ShowVerbose
 
         # Phase 5: Commit/Stage (standalone only)
         $filesChanged = 0
