@@ -188,6 +188,63 @@ Write-Host ""
 
 Test-Preflight
 
+# ── Early checkpoint detection (before branch creation) ───────────
+# Check if a checkpoint exists in the target repo so we can reuse its branch
+$earlyRepoPath = if ($config.RepoPath) { $config.RepoPath } elseif ($config.ClonePath -and (Test-Path $config.ClonePath)) { $config.ClonePath } else { $null }
+if ($earlyRepoPath -and -not $CleanStart) {
+    $earlyCheckpointPath = Join-Path $earlyRepoPath ".monkey-output\run-checkpoint.json"
+    if (Test-Path $earlyCheckpointPath) {
+        try {
+            $earlyCp = Get-Content $earlyCheckpointPath -Raw | ConvertFrom-Json
+            $cpBranch = $earlyCp.branch
+            $cpModel = $earlyCp.model
+            $cpPack = $earlyCp.pack
+
+            # Count monkey statuses
+            $cpMonkeys = if ($earlyCp.monkeys -is [hashtable]) { $earlyCp.monkeys } else { $earlyCp.monkeys }
+            $mProps = if ($cpMonkeys -is [hashtable]) { $cpMonkeys.Keys } else { $cpMonkeys.PSObject.Properties.Name }
+            $completedCount = @($mProps | Where-Object {
+                $s = if ($cpMonkeys -is [hashtable]) { $cpMonkeys[$_].status } else { $cpMonkeys.$_.status }
+                $s -in @('complete', 'skipped')
+            }).Count
+            $totalCount = $mProps.Count
+
+            Write-Host ""
+            Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+            Write-Host "  ║       🔖 CHECKPOINT FOUND IN REPO                  ║" -ForegroundColor Cyan
+            Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+            Write-Host "  Branch:  $cpBranch" -ForegroundColor DarkGray
+            Write-Host "  Model:   $cpModel" -ForegroundColor DarkGray
+            Write-Host "  Pack:    $cpPack" -ForegroundColor DarkGray
+            Write-Host "  Progress: $completedCount/$totalCount monkeys done" -ForegroundColor DarkGray
+            Write-Host ""
+
+            $useCheckpoint = $false
+            if ($Resume -or $NonInteractive) {
+                # Auto-resume: adopt checkpoint branch
+                $useCheckpoint = $true
+                Write-Step "Resuming from checkpoint — using branch '$cpBranch'" "OK"
+            }
+            else {
+                Write-Host "  Resume from this checkpoint?" -ForegroundColor Cyan
+                Write-Host "    [R] Resume (use branch $cpBranch)  |  [F] Fresh start (new branch)" -ForegroundColor DarkGray
+                $choice = Read-Host "  Choice (R/F, default=R)"
+                $useCheckpoint = ($choice -notmatch '^[Ff]')
+            }
+
+            if ($useCheckpoint) {
+                # Override branch to match checkpoint
+                $config['BranchName'] = $cpBranch
+                if (-not $Resume) { $Resume = $true }
+                Write-Step "Will resume on branch: $cpBranch" "OK"
+            }
+        }
+        catch {
+            Write-Step "Checkpoint file found but unreadable — starting fresh" "WARN"
+        }
+    }
+}
+
 # Setup repo (clone/branch)
 $setupParams = @{
     BranchPrefix  = "monkey-army"
@@ -198,7 +255,7 @@ if ($config.RepoUrl)       { $setupParams.RepoUrl = $config.RepoUrl }
 if ($config.ClonePath)     { $setupParams.ClonePath = $config.ClonePath }
 if ($config.BaseBranch)    { $setupParams.BaseBranch = $config.BaseBranch }
 if ($config.UseBaseBranch) { $setupParams.UseBaseBranch = [switch]::new($true) }
-if ($config.BranchName)    { $setupParams.BranchName = $config.BranchName }
+if ($config.BranchName -or $config['BranchName'])    { $setupParams.BranchName = $config['BranchName'] ?? $config.BranchName }
 if ($NonInteractive)       { $setupParams.NonInteractive = [switch]::new($true) }
 
 $setup = Invoke-MonkeySetup @setupParams
