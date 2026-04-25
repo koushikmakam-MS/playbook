@@ -228,20 +228,20 @@ Prompt:
      For each entry point, trace 1-2 levels down (BL → impl/service).
      If 2+ controllers share the SAME impl/service class → MERGE into
      one domain named after the shared impl.
-       Example: RestoreController + RecoveryPointController both call
-       RestoreImpl.cs → domain = "Restore & RecoveryPoints"
+       Example: ProductController + InventoryController both call
+       ProductService.cs → domain = "Products & Inventory"
 
      STEP 3 — SPLIT BY ACTION DIVERGENCE:
      If one controller's actions route to 2+ DIFFERENT impl classes
      with unrelated logic → SPLIT into separate domains.
-       Example: BackupInstanceController routes CRUD to BackupInstanceImpl
-       but suspend/resume to BackupInstanceSuspendResumeImpl → 2 domains.
+       Example: OrderController routes CRUD to OrderService
+       but cancellation to OrderCancellationService → 2 domains.
        Heuristic: if the impl files share <30% of their dependencies
        (config reads, entity types, telemetry classes), they're separate.
 
      STEP 4 — NAME THE DOMAIN:
      Priority order:
-       a. ARM resource type (backupInstances, backupPolicies, protectedItems)
+       a. Resource type (orders, payments, users, products)
        b. Shared impl class name (minus "Impl" suffix)
        c. Controller name (minus "Controller" suffix)
 
@@ -289,9 +289,9 @@ Prompt:
   About this repo (DELETE examples, fill in yours):
   - Language/Framework: «C# .NET 8 | Python FastAPI | TypeScript Node.js»
   - Architecture: «MVC | Clean Architecture | Microservices»
-  - Key domains: «Payments, Backup Management, Identity»
+  - Key domains: «Payments, Orders, Identity»
   - Test framework: «MSTest | xUnit | pytest | Jest»
-  - Deployment: «Service Fabric | Kubernetes | Azure Functions»
+  - Deployment: «Kubernetes | Docker | AWS Lambda | Azure Functions»
 
   Paths: DOCS_ROOT={DOCS_ROOT}/, SKILLS_ROOT={SKILLS_ROOT}/
 
@@ -361,7 +361,7 @@ Prompt:
 
   Create workflow docs in `{DOCS_ROOT}/workflows/` with README index.
 
-  SCOPE: «3–5 domains, e.g., "BackupInstance, BackupPolicy, Restore"
+  SCOPE: «3–5 domains, e.g., "Orders, Payments, Users"
           — small repos can list all at once»
 
   SOURCE READING: Per domain read controller + service/BL + downstream
@@ -381,10 +381,10 @@ Prompt:
       participant BL as Business Logic
       participant Impl as VaultImpl
       participant Plugin
-      Client->>Controller: DELETE /backupInstances/{name}
-      Controller->>BL: DeleteBackupInstanceInternal()
-      BL->>Impl: PurgeBackupInstanceInternal()
-      Impl->>Plugin: DoDeleteBackupInstanceOperation()
+      Client->>Controller: DELETE /orders/{id}
+      Controller->>BL: DeleteOrderInternal()
+      BL->>Impl: ProcessOrderDeletion()
+      Impl->>Plugin: DoDeleteOrderOperation()
       Plugin-->>Impl: AsyncStatus{Succeeded}
       Impl-->>BL: Response(200 OK)
     ```
@@ -459,7 +459,7 @@ Prompt:
 
   ---
 
-  ## «Domain 1 Name» (e.g., DPP / Backup Vault) Controllers
+  ## «Domain 1 Name» (e.g., Auth / Payments) Controllers
 
   ### Documented Controllers
 
@@ -473,7 +473,7 @@ Prompt:
   |----------------------|-----------------|-----------------|
   | «ControllerName»     | `«path»/`       | New workflow doc / Add section to #NN |
 
-  (Repeat Documented + Undocumented tables for each domain: DPP, RSV, etc.)
+  (Repeat Documented + Undocumented tables for each domain: Auth, Orders, etc.)
 
   ---
 
@@ -944,7 +944,7 @@ To run:
   2. Copy the prompt below (between the ═══ lines).
   3. Answer the 7 setup questions:
      - Questions per domain (recommend: 5)
-     - Focus area (blank = all, or "DPP", "RSV")
+     - Focus area (blank = all, or "Auth", "Orders")
      - Difficulty (recommend: deep)
      - Max consecutive ✅ before skip (recommend: 3)
      - Auto-fix: yes (edit docs) or dry-run (report only)
@@ -971,7 +971,7 @@ human response. You run the full loop autonomously.
 BEFORE YOU START, ask me these questions ONE AT A TIME:
 
   1. How many total questions? (number, default: 100)
-  2. Focus area? (blank = all domains, or specify like "DPP", "RSV")
+  2. Focus area? (blank = all domains, or specify like "Auth", "Orders")
   3. Difficulty? (basic / intermediate / deep — default: deep)
   4. Max consecutive ✅ before skipping to next domain? (default: 3)
   5. Auto-fix gaps? (yes = edit docs, dry-run = report only — default: yes)

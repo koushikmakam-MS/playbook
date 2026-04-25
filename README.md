@@ -82,7 +82,7 @@ playbook/
 │   └── DocHealthScorer.psm1    ←   Before/after doc health scoring (0–110)
 │
 └── prompts/                    ← 📝 AI prompts
-    ├── playbook-v2.9.txt       ←   75KB knowledge layer mega-prompt (7 phases)
+    ├── playbook.txt            ←   75KB knowledge layer mega-prompt (7 phases)
     └── curious-george-prompt.md←   3-pass autonomous auditor prompt
 ```
 
@@ -121,7 +121,7 @@ flowchart TB
     monkeys --> shared
 
     subgraph prompts ["📝 Prompts"]
-        PR1["playbook-v2.9.txt<br/><i>75KB knowledge layer</i>"]
+        PR1["playbook.txt<br/><i>75KB knowledge layer</i>"]
         PR2["curious-george-prompt.md<br/><i>3-pass autonomous auditor</i>"]
     end
 
@@ -226,8 +226,8 @@ Or pick specific monkeys: `-Monkeys rafiki,mojo-jojo,marcel`
 ```powershell
 # Sequential — two repos, same config
 .\Run-PlayerList.ps1 -Repos @(
-    "C:\Repo\BackupMgmt",
-    "https://github.com/org/data-plane.git"
+    "C:\Repo\MyService",
+    "https://github.com/org/my-api.git"
 ) -Pack full -QuestionsPerEntry 10 -CommitMode commit
 
 # Parallel — 3 repos at once
@@ -239,8 +239,8 @@ Or pick specific monkeys: `-Monkeys rafiki,mojo-jojo,marcel`
 
 # Per-repo overrides via hashtables
 .\Run-PlayerList.ps1 -Repos @(
-    @{ Path = "C:\Repo\BackupMgmt"; BaseBranch = "develop"; Pack = "full" },
-    @{ Url = "https://dev.azure.com/org/proj/_git/DataPlane"; BaseBranch = "main"; Pack = "audit" }
+    @{ Path = "C:\Repo\MyService"; BaseBranch = "develop"; Pack = "full" },
+    @{ Url = "https://dev.azure.com/org/proj/_git/MyApi"; BaseBranch = "main"; Pack = "audit" }
 ) -QuestionsPerEntry 10 -CommitMode commit
 
 # Load repos from a JSON file
@@ -253,13 +253,13 @@ Or pick specific monkeys: `-Monkeys rafiki,mojo-jojo,marcel`
 ```json
 [
   {
-    "Path": "C:\\Repo\\BackupMgmt",
+    "Path": "C:\\Repo\\MyService",
     "BaseBranch": "develop",
-    "BranchName": "feature/copilot-knowledge-layer"
+    "BranchName": "feature/knowledge-layer"
   },
   {
-    "Url": "https://dev.azure.com/org/proj/_git/DataPlane",
-    "BaseBranch": "feature/copilot-knowledge-layer",
+    "Url": "https://dev.azure.com/org/proj/_git/MyApi",
+    "BaseBranch": "main",
     "UseBaseBranch": true
   }
 ]

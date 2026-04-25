@@ -44,8 +44,8 @@
 .EXAMPLE
     # Mix of local and remote repos with per-repo overrides
     .\Run-MultiRepo.ps1 -Repos @(
-        @{ Path = "C:\Repo\BackupMgmt"; BaseBranch = "develop"; Pack = "full" },
-        @{ Url = "https://dev.azure.com/org/proj/_git/DataPlane"; Pack = "audit" }
+        @{ Path = "C:\Repo\MyService"; BaseBranch = "develop"; Pack = "full" },
+        @{ Url = "https://dev.azure.com/org/proj/_git/MyApi"; Pack = "audit" }
     ) -QuestionsPerEntry 10 -CommitMode commit
 #>
 
