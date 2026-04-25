@@ -74,7 +74,8 @@ param(
     [int]$BatchSize = 5,         # Questions per batch (0 = single mode)
     [switch]$Incremental,        # Only process changed files
     [string]$Since,              # Git ref or date for incremental mode
-    [switch]$Resume              # Resume from last checkpoint
+    [switch]$Resume,             # Resume from last checkpoint
+    [switch]$CleanStart          # Purge all checkpoints before running
 )
 
 $ErrorActionPreference = "Stop"
@@ -241,6 +242,18 @@ $monkeyScripts = @{
     'curious-george' = 'curious-george.ps1'
 }
 
+# ── CleanStart: purge all checkpoints ─────────────────────────────
+if ($CleanStart) {
+    Write-Step "CleanStart: purging all checkpoints..." "INFO"
+    $runCp = Join-Path $outputRoot "run-checkpoint.json"
+    if (Test-Path $runCp) { Remove-Item $runCp -Force; Write-Step "  Removed run-checkpoint.json" "INFO" }
+    Get-ChildItem -Path $outputRoot -Recurse -Filter "batch-checkpoint.json" -ErrorAction SilentlyContinue | ForEach-Object {
+        Remove-Item $_.FullName -Force
+        Write-Step "  Removed $($_.FullName)" "INFO"
+    }
+    Write-Step "All checkpoints purged — starting fresh" "OK"
+}
+
 # ── Checkpoint / Resume detection ─────────────────────────────────
 $existingCheckpoint = Get-RunCheckpoint -OutputRoot $outputRoot
 $skipMonkeys = @{}  # monkeyId → $true for monkeys to skip on resume
@@ -302,7 +315,7 @@ if ($existingCheckpoint) {
         $monkeyProps = if ($monkeyData -is [hashtable]) { $monkeyData.Keys } else { $monkeyData.PSObject.Properties.Name }
         foreach ($mId in $monkeyProps) {
             $mState = if ($monkeyData -is [hashtable]) { $monkeyData[$mId] } else { $monkeyData.$mId }
-            if ($mState.status -eq 'complete' -and $mState.result) {
+            if ($mState.status -in @('complete', 'skipped') -and $mState.result) {
                 $skipMonkeys[$mId] = $true
                 # Restore result — convert PSCustomObject back to hashtable
                 $restored = @{}
@@ -311,7 +324,11 @@ if ($existingCheckpoint) {
                 }
                 $results[$mId] = $restored
             }
-            # in-progress monkeys will be re-run (not skipped)
+            elseif ($mState.status -eq 'skipped') {
+                # Skipped without result (e.g., playbook skip) — still skip on resume
+                $skipMonkeys[$mId] = $true
+            }
+            # in-progress and failed monkeys will be re-run (not skipped)
         }
 
         $skipCount = $skipMonkeys.Count
@@ -371,6 +388,8 @@ foreach ($monkey in $config.OrderedMonkeys) {
         Write-Step "$($monkey.Emoji) $($monkey.Name) — script not found, SKIPPING" "WARN"
         $results[$monkeyId] = New-MonkeyResult -MonkeyName $monkey.Name -ExitStatus 'SKIPPED' `
             -Errors @("Script not found: $monkeyScript")
+        $runCheckpoint.monkeys[$monkeyId] = @{ status = 'skipped'; completedAt = (Get-Date).ToString('o') }
+        Save-RunCheckpoint -OutputRoot $outputRoot -CheckpointData $runCheckpoint
         continue
     }
 
@@ -389,6 +408,8 @@ foreach ($monkey in $config.OrderedMonkeys) {
             Write-Host "  Use -ForcePlaybook to re-run anyway." -ForegroundColor DarkGray
             $results[$monkeyId] = New-MonkeyResult -MonkeyName $monkey.Name -ExitStatus 'SKIPPED' `
                 -Errors @("Knowledge layer already exists (score $($playbookCheck.Score)/5)")
+            $runCheckpoint.monkeys[$monkeyId] = @{ status = 'skipped'; completedAt = (Get-Date).ToString('o') }
+            Save-RunCheckpoint -OutputRoot $outputRoot -CheckpointData $runCheckpoint
             continue
         }
         elseif ($playbookCheck.Score -gt 0) {
@@ -515,8 +536,9 @@ foreach ($monkey in $config.OrderedMonkeys) {
         Write-Host "  → $($monkey.Emoji) $($monkey.Name): $($result.ExitStatus) ($($result.QuestionsAnswered)/$($result.QuestionsAsked) answered, $($result.Duration))" -ForegroundColor $statusColor
 
         # ── Save checkpoint after monkey completes ──
+        $cpStatus = if ($result.ExitStatus -eq 'FAILED') { 'failed' } else { 'complete' }
         $runCheckpoint.monkeys[$monkeyId] = @{
-            status      = 'complete'
+            status      = $cpStatus
             completedAt = (Get-Date).ToString('o')
             result      = $result
         }

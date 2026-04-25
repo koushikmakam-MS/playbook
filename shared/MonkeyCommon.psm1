@@ -1215,7 +1215,12 @@ function Invoke-MonkeyQuestions {
 
     # Assign stable IDs to each question
     foreach ($q in $Questions) {
-        $q['QuestionId'] = Get-QuestionId -EntryPoint $q.EntryPoint -Question $q.Question
+        $qId = Get-QuestionId -EntryPoint $q.EntryPoint -Question $q.Question
+        if ($q -is [hashtable]) {
+            $q['QuestionId'] = $qId
+        } else {
+            $q | Add-Member -NotePropertyName 'QuestionId' -NotePropertyValue $qId -Force
+        }
     }
 
     # Load checkpoint — skip already-completed questions
@@ -1246,7 +1251,11 @@ function Invoke-MonkeyQuestions {
                 $batch = @($Questions[$i..($end - 1)])
                 # Assign batch-local indices
                 $bIdx = 0
-                foreach ($bq in $batch) { $bq['BatchIndex'] = ++$bIdx }
+                foreach ($bq in $batch) {
+                    $bIdx++
+                    if ($bq -is [hashtable]) { $bq['BatchIndex'] = $bIdx }
+                    else { $bq | Add-Member -NotePropertyName 'BatchIndex' -NotePropertyValue $bIdx -Force }
+                }
                 [void]$batches.Add($batch)
             }
 
@@ -1857,8 +1866,12 @@ function Get-ArmyConfig {
     # ═══════════════════════════════════════════
     Write-Host ""
 
-    # Q3: Pack / monkey selection
-    if ($Pack) {
+    # Q3: Pack / monkey selection (-Monkeys overrides -Pack)
+    if ($Monkeys -and $Monkeys.Count -gt 0) {
+        $config.SelectedMonkeys = $Monkeys
+        $config.Pack = if ($Pack) { "$Pack+override" } else { 'custom' }
+    }
+    elseif ($Pack) {
         if (-not $script:MonkeyPacks.ContainsKey($Pack)) {
             throw "Unknown pack '$Pack'. Available: $($script:MonkeyPacks.Keys -join ', ')"
         }
