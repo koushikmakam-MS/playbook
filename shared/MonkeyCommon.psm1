@@ -935,10 +935,20 @@ function Invoke-MonkeySetup {
             $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
             $BranchName = "$BranchPrefix/$timestamp"
         }
-        & git checkout -b $BranchName 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Failed to create branch '$BranchName'" }
-        $actualBranch = $BranchName
-        Write-Step "Created branch: $BranchName" "OK"
+        # Try checkout existing branch first; create only if it doesn't exist
+        $branchExists = & git rev-parse --verify $BranchName 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            & git checkout $BranchName 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Failed to checkout existing branch '$BranchName'" }
+            $actualBranch = $BranchName
+            Write-Step "Checked out existing branch: $BranchName" "OK"
+        }
+        else {
+            & git checkout -b $BranchName 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Failed to create branch '$BranchName'" }
+            $actualBranch = $BranchName
+            Write-Step "Created branch: $BranchName" "OK"
+        }
     }
 
     # ── Output directory ──
