@@ -66,6 +66,12 @@ param(
     [int]$MaxRetries = 3,
     [int]$RetryBaseDelay = 30,
     [int]$CallTimeout = 300,
+    [int]$BatchSize = 5,
+
+    [switch]$Incremental,
+
+    [string]$Since,
+
     [switch]$ShowVerbose,
 
     # Internal mode (called by orchestrator — skips setup/commit)
@@ -591,6 +597,33 @@ function Start-KingLouie {
         # ── Phase 2: Discovery ──
         $discovery = Invoke-Discovery -WorkDir $workDir
 
+        # Incremental filter
+        if ($Incremental -or $Since) {
+            $sinceRef = $Since
+            if (-not $sinceRef) {
+                $lastState = Get-IncrementalState -WorkingDirectory $workDir
+                if ($lastState) {
+                    $sinceRef = $lastState.CommitHash
+                    Write-Step "Incremental: using last run commit $sinceRef" "INFO"
+                }
+                else {
+                    Write-Step "No prior run found — running full" "WARN"
+                }
+            }
+            if ($sinceRef) {
+                $changedFiles = Get-ChangedFiles -WorkingDirectory $workDir -Since $sinceRef
+                $discovery.CodeEndpoints = @($discovery.CodeEndpoints | Where-Object { $_.File -in $changedFiles })
+                $discovery.SpecEndpoints = @($discovery.SpecEndpoints | Where-Object { $_.File -in $changedFiles })
+                $discovery.Gaps = @($discovery.Gaps | Where-Object { $_.File -in $changedFiles })
+                if ($discovery.Gaps.Count -eq 0 -and $discovery.CodeEndpoints.Count -eq 0) {
+                    Write-Step "No endpoints changed — nothing to validate" "OK"
+                    $duration = (Get-Date) - $startTime
+                    return New-MonkeyResult -MonkeyName $script:MONKEY_NAME -Duration $duration `
+                        -Model $script:SelectedModel -ExitStatus 'SUCCESS' -QuestionsAsked 0 -QuestionsAnswered 0
+                }
+            }
+        }
+
         # Save discovery results
         $discoveryReport = @{
             SpecFiles     = $discovery.SpecFiles
@@ -621,7 +654,7 @@ function Start-KingLouie {
         # ── Phase 4: Execution (shared) ──
         $execStats = Invoke-MonkeyQuestions -Questions $questions -WorkingDirectory $workDir `
             -OutputPath $script:OutputPath -ModelName $script:SelectedModel -MonkeyEmoji $script:MONKEY_EMOJI `
-            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -ShowVerbose:$ShowVerbose
+            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -BatchSize $BatchSize -ShowVerbose:$ShowVerbose
 
         # ── Phase 5: Commit/Stage + Report ──
         $filesChanged = 0

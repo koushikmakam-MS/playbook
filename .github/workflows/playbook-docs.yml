@@ -1,0 +1,151 @@
+name: Playbook Doc Audit
+
+on:
+  pull_request:
+    branches: [master, main]
+    paths:
+      - 'src/**'
+      - 'lib/**'
+      - 'app/**'
+      - 'pkg/**'
+      - 'cmd/**'
+      - 'internal/**'
+  workflow_dispatch:
+    inputs:
+      monkey:
+        description: 'Monkey to run (rafiki, abu, mojo-jojo, or full)'
+        required: false
+        default: 'rafiki'
+      questions_per_entry:
+        description: 'Questions per entry point'
+        required: false
+        default: '5'
+      batch_size:
+        description: 'Batch size for execution'
+        required: false
+        default: '5'
+      incremental:
+        description: 'Run in incremental mode (only changed files)'
+        required: false
+        default: 'true'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  doc-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for incremental mode
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install GitHub Copilot CLI
+        run: npm install -g @githubnext/github-copilot-cli
+
+      - name: Clone Playbook
+        run: |
+          git clone https://github.com/KoushikMakam/playbook.git /tmp/playbook
+          echo "Playbook cloned to /tmp/playbook"
+
+      - name: Setup PowerShell modules
+        shell: pwsh
+        run: |
+          Import-Module /tmp/playbook/shared/MonkeyCommon.psm1 -Force
+          Write-Host "MonkeyCommon loaded"
+
+      - name: Run Playbook (PR mode)
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $baseRef = "${{ github.event.pull_request.base.sha }}"
+          /tmp/playbook/monkey-army/rafiki.ps1 `
+            -RepoPath "${{ github.workspace }}" `
+            -QuestionsPerEntry 5 `
+            -BatchSize 5 `
+            -Incremental `
+            -Since $baseRef `
+            -DryRun `
+            -UseBaseBranch `
+            -Model "gpt-4.1" `
+            -OutputDir ".playbook-output"
+
+      - name: Run Playbook (manual)
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $monkey = "${{ inputs.monkey }}"
+          $qpe = [int]"${{ inputs.questions_per_entry }}"
+          $bs = [int]"${{ inputs.batch_size }}"
+          $incr = "${{ inputs.incremental }}" -eq "true"
+
+          $params = @{
+            RepoPath = "${{ github.workspace }}"
+            QuestionsPerEntry = $qpe
+            BatchSize = $bs
+            DryRun = $true
+            UseBaseBranch = $true
+            Model = "gpt-4.1"
+            OutputDir = ".playbook-output"
+          }
+          if ($incr) { $params.Incremental = $true }
+
+          switch ($monkey) {
+            "rafiki"    { /tmp/playbook/monkey-army/rafiki.ps1 @params }
+            "abu"       { /tmp/playbook/monkey-army/abu.ps1 @params }
+            "mojo-jojo" { /tmp/playbook/monkey-army/mojo-jojo.ps1 @params }
+            "full"      { /tmp/playbook/Run-MonkeyArmy.ps1 @params -Pack "audit" }
+            default     { Write-Error "Unknown monkey: $monkey" }
+          }
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playbook-results
+          path: .playbook-output/
+          retention-days: 30
+
+      - name: Comment PR with summary
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summaryPath = '.playbook-output/summary.json';
+            if (!fs.existsSync(summaryPath)) {
+              console.log('No summary found — skipping PR comment');
+              return;
+            }
+            const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
+            const body = `## 🐒 Playbook Doc Audit Results
+
+            | Metric | Value |
+            |--------|-------|
+            | Entry Points | ${summary['01_EntryPoints'] || 'N/A'} |
+            | Questions Asked | ${summary['02_QuestionsGenerated'] || 'N/A'} |
+            | Questions Answered | ${summary['03_QuestionsAnswered'] || 'N/A'} |
+            | Doc Grounded | ${summary['07_DocGrounded'] || 'N/A'} |
+            | Files Changed | ${summary['06_FilesChanged'] || 'N/A'} |
+            | Duration | ${summary['10_Duration'] || 'N/A'} |
+
+            📄 Full results in workflow artifacts.`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body.replace(/            /g, '')
+            });

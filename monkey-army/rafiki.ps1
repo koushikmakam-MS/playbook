@@ -104,6 +104,12 @@ param(
 
     [string[]]$ExcludePattern = @(),
 
+    [int]$BatchSize = 5,
+
+    [switch]$Incremental,
+
+    [string]$Since,
+
     [switch]$ShowVerbose,
 
     # Internal mode (called by orchestrator — skips setup/commit)
@@ -611,13 +617,38 @@ function Start-Rafiki {
         # Phase 2: Discovery
         $entryPoints = Get-EntryPoints -RootDir $workDir
 
+        # Incremental filter — only process changed files
+        if ($Incremental -or $Since) {
+            $sinceRef = $Since
+            if (-not $sinceRef) {
+                $lastState = Get-IncrementalState -WorkingDirectory $workDir
+                if ($lastState) {
+                    $sinceRef = $lastState.CommitHash
+                    Write-Step "Incremental: using last run commit $sinceRef" "INFO"
+                }
+                else {
+                    Write-Step "No prior run found — running full (use -Since to specify a ref)" "WARN"
+                }
+            }
+            if ($sinceRef) {
+                $changedFiles = Get-ChangedFiles -WorkingDirectory $workDir -Since $sinceRef
+                $entryPoints = Select-IncrementalEntryPoints -EntryPoints $entryPoints -ChangedFiles $changedFiles -WorkingDirectory $workDir
+                if ($entryPoints.Count -eq 0) {
+                    Write-Step "No entry points changed since '$sinceRef' — nothing to do" "OK"
+                    $currentCommit = (& git -C $workDir rev-parse HEAD 2>&1).Trim()
+                    Save-IncrementalState -WorkingDirectory $workDir -MonkeyName "rafiki" -CommitHash $currentCommit -EntryPointCount 0 -QuestionsAsked 0
+                    return New-MonkeyResult -MonkeyName "Rafiki" -ExitStatus 'SKIPPED' -Model $script:SelectedModel
+                }
+            }
+        }
+
         # Phase 3: Question generation
         $questions = New-Questions -EntryPoints $entryPoints -WorkingDirectory $workDir
 
         # Phase 4: Execution (shared)
         $execStats = Invoke-MonkeyQuestions -Questions $questions -WorkingDirectory $workDir `
             -OutputPath $script:OutputPath -ModelName $script:SelectedModel -MonkeyEmoji $script:MONKEY_EMOJI `
-            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -ShowVerbose:$ShowVerbose
+            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -BatchSize $BatchSize -ShowVerbose:$ShowVerbose
 
         # Phase 5: Commit/Stage (standalone only)
         $filesChanged = 0
@@ -630,6 +661,10 @@ function Start-Rafiki {
         # Summary + Report
         $duration = (Get-Date) - $startTime
         $reportStats = Save-MonkeyReport -ExecStats $execStats -OutputPath $script:OutputPath -MonkeyName $script:MONKEY_NAME
+
+        # Save incremental state for next run
+        $currentCommit = (& git -C $workDir rev-parse HEAD 2>&1).Trim()
+        Save-IncrementalState -WorkingDirectory $workDir -MonkeyName "rafiki" -CommitHash $currentCommit -EntryPointCount $entryPoints.Count -QuestionsAsked $questions.Count
 
         $runStats = @{
             "01_EntryPoints"        = $entryPoints.Count
