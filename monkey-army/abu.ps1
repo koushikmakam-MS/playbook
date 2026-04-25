@@ -415,118 +415,178 @@ function New-GapQuestions {
     <#
     .SYNOPSIS
         Generates targeted questions designed to fill specific doc gaps.
+        Batches multiple gaps per Copilot call (default 10) to reduce API calls.
         For undocumented code: asks about architecture, API, error handling.
         For incomplete docs: asks about specific missing sections.
     #>
     param(
         [array]$Gaps,
-        [string]$WorkingDirectory
+        [string]$WorkingDirectory,
+        [int]$GapBatchSize = 10
     )
 
-    Write-Phase "PHASE 3b" "Gap-Targeted Question Generation ($($Gaps.Count) gaps)"
+    Write-Phase "PHASE 3b" "Gap-Targeted Question Generation ($($Gaps.Count) gaps, batch=$GapBatchSize)"
 
     $allQuestions = @()
     $questionHashes = @{}
     $totalGaps = $Gaps.Count
-    $currentGap = 0
+    $processedGaps = 0
 
-    foreach ($gap in $Gaps) {
-        $currentGap++
-        $pct = [Math]::Round(($currentGap / $totalGaps) * 100)
-        Write-Progress -Activity "Generating gap-filling questions" -Status "$currentGap/$totalGaps — $($gap.TargetName)" -PercentComplete $pct
+    # Split gaps into batches for fewer Copilot calls
+    $batches = @()
+    for ($i = 0; $i -lt $Gaps.Count; $i += $GapBatchSize) {
+        $end = [Math]::Min($i + $GapBatchSize, $Gaps.Count)
+        $batches += ,@($Gaps[$i..($end - 1)])
+    }
 
-        $genPrompt = ""
+    $totalBatches = $batches.Count
+    Write-Step "Batching $totalGaps gaps into $totalBatches Copilot calls (${GapBatchSize}/batch)" "INFO"
 
-        if ($gap.Type -eq "UNDOCUMENTED_CODE") {
-            $genPrompt = @"
-The file '$($gap.Target)' has NO documentation. It needs a comprehensive workflow doc.
+    for ($batchIdx = 0; $batchIdx -lt $totalBatches; $batchIdx++) {
+        $batch = $batches[$batchIdx]
+        $batchNum = $batchIdx + 1
+        $processedGaps += $batch.Count
+        $pct = [Math]::Round(($processedGaps / $totalGaps) * 100)
+        Write-Progress -Activity "Generating gap-filling questions" -Status "Batch $batchNum/$totalBatches ($processedGaps/$totalGaps gaps)" -PercentComplete $pct
 
-Generate exactly $QuestionsPerGap questions that, when answered, would produce complete documentation for this code.
-Focus on:
-- What does this code do? (overview, purpose, when it's called)
-- What is the architecture? (layers, dependencies, call chain)
-- What APIs/entry points does it expose? (methods, parameters, return values)
-- How does it handle errors? (exceptions, retries, fallbacks)
-- What configuration does it depend on?
-- How is it tested?
-- What security considerations exist?
-
-Each question should be a direct request that copilot can answer by reading the code.
-Output ONLY a JSON array of strings. No explanation, no markdown.
-
-Example: ["What is the complete request flow for the main POST endpoint in this controller, from HTTP entry to data persistence?"]
-"@
+        # Build a combined prompt for all gaps in this batch
+        $gapDescriptions = @()
+        foreach ($gap in $batch) {
+            if ($gap.Type -eq "UNDOCUMENTED_CODE") {
+                $gapDescriptions += "- FILE: `"$($gap.Target)`" — UNDOCUMENTED. Generate $QuestionsPerGap questions covering: purpose, architecture, APIs, error handling, config, testing."
+            }
+            elseif ($gap.Type -eq "INCOMPLETE_DOC") {
+                $missingSections = $gap.MissingSections -join ", "
+                $gapDescriptions += "- DOC: `"$($gap.Target)`" — INCOMPLETE, missing: $missingSections. Generate $QuestionsPerGap questions targeting those missing sections."
+            }
         }
-        elseif ($gap.Type -eq "INCOMPLETE_DOC") {
-            $missingSections = $gap.MissingSections -join ", "
-            $genPrompt = @"
-The doc '$($gap.Target)' exists but is INCOMPLETE. It is missing these sections: $missingSections
+        $gapList = $gapDescriptions -join "`n"
 
-Generate exactly $QuestionsPerGap questions that, when answered, would fill these gaps.
-Each question should target a specific missing section.
-Questions must be answerable by reading the codebase — they should ask copilot to analyze the code
-and document the missing aspect.
+        $genPrompt = @"
+Generate documentation questions for these $($batch.Count) code/doc gaps:
 
-Output ONLY a JSON array of strings. No explanation, no markdown.
+$gapList
 
-Example: ["What error handling patterns are used in this module, and what error codes can be returned?"]
+For each gap, generate exactly $QuestionsPerGap questions that would produce complete documentation when answered.
+Questions must be answerable by reading the codebase.
+
+Output ONLY a JSON object where each key is the file path and each value is an array of question strings.
+No explanation, no markdown fences.
+
+Example:
+{"src/Controllers/FooController.cs": ["What is the request flow?", "How are errors handled?"], "docs/bar.md": ["What config does it depend on?"]}
 "@
-        }
 
-        Write-Step "[$currentGap/$totalGaps] Generating $QuestionsPerGap questions for $($gap.TargetName) ($($gap.Type))..." "INFO"
+        Write-Step "[Batch $batchNum/$totalBatches] Generating questions for $($batch.Count) gaps ($processedGaps/$totalGaps)..." "INFO"
 
         $result = Invoke-CopilotWithRetry -Prompt $genPrompt -ModelName $script:SelectedModel -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
 
         if (-not $result.Success) {
-            Write-Step "Failed to generate questions for $($gap.TargetName): $($result.Error)" "ERROR"
+            Write-Step "Batch $batchNum failed: $($result.Error). Falling back to per-gap generation." "WARN"
+            # Fallback: generate per-gap for this batch only
+            foreach ($gap in $batch) {
+                $fallbackQuestions = New-SingleGapQuestions -Gap $gap -WorkingDirectory $WorkingDirectory
+                foreach ($fq in $fallbackQuestions) {
+                    $hash = Get-QuestionHash $fq.Question
+                    if (-not $questionHashes.ContainsKey($hash)) {
+                        $questionHashes[$hash] = $true
+                        $allQuestions += $fq
+                    }
+                }
+            }
             continue
         }
 
-        $questions = @()
+        # Parse batched JSON response: { "filepath": ["q1", "q2"], ... }
+        $parsed = $null
         try {
             $output = $result.Output.Trim()
-            if ($output -match '\[[\s\S]*\]') {
-                $jsonMatch = $Matches[0]
-                $questions = @($jsonMatch | ConvertFrom-Json)
+            if ($output -match '\{[\s\S]*\}') {
+                $parsed = $Matches[0] | ConvertFrom-Json
             }
         }
         catch {
-            Write-Step "JSON parse failed for $($gap.TargetName). Falling back to line parsing." "WARN"
-            $questions = @()
-            $lines = $result.Output -split "`n"
-            foreach ($line in $lines) {
-                if ($line -match '^\s*\d+[\.\)]\s*(.+)') {
-                    $questions += $Matches[1].Trim()
+            Write-Step "JSON parse failed for batch $batchNum. Falling back to flat array parse." "WARN"
+        }
+
+        if ($null -ne $parsed) {
+            # Structured response — map questions to their gap targets
+            foreach ($gap in $batch) {
+                $target = $gap.Target
+                $questions = @()
+
+                # Try exact match first, then partial match
+                if ($parsed.PSObject.Properties.Name -contains $target) {
+                    $questions = @($parsed.$target)
+                }
+                else {
+                    $targetName = [System.IO.Path]::GetFileName($target)
+                    foreach ($key in $parsed.PSObject.Properties.Name) {
+                        if ($key -like "*$targetName*" -or $key -like "*$($gap.TargetName)*") {
+                            $questions = @($parsed.$key)
+                            break
+                        }
+                    }
+                }
+
+                foreach ($q in $questions) {
+                    if ([string]::IsNullOrWhiteSpace($q)) { continue }
+                    $hash = Get-QuestionHash $q
+                    if (-not $questionHashes.ContainsKey($hash)) {
+                        $questionHashes[$hash] = $true
+                        $allQuestions += @{
+                            EntryPoint = $target
+                            Language   = "doc-gap"
+                            Question   = $q
+                            Category   = $gap.Type
+                            GapType    = $gap.Type
+                            Severity   = $gap.Severity
+                        }
+                    }
                 }
             }
         }
-
-        if ($questions.Count -eq 0) {
-            Write-Step "No questions parsed for $($gap.TargetName)" "WARN"
-            continue
-        }
-
-        foreach ($q in $questions) {
-            $hash = [System.BitConverter]::ToString(
-                [System.Security.Cryptography.SHA256]::Create().ComputeHash(
-                    [System.Text.Encoding]::UTF8.GetBytes($q.ToLower().Trim())
-                )
-            ).Substring(0, 16)
-
-            if (-not $questionHashes.ContainsKey($hash)) {
-                $questionHashes[$hash] = $true
-                $allQuestions += @{
-                    EntryPoint = $gap.Target
-                    Language   = "doc-gap"
-                    Question   = $q
-                    Category   = $gap.Type
-                    GapType    = $gap.Type
-                    Severity   = $gap.Severity
+        else {
+            # Flat array fallback — assign questions round-robin to gaps
+            $flatQuestions = @()
+            try {
+                if ($output -match '\[[\s\S]*\]') {
+                    $flatQuestions = @($Matches[0] | ConvertFrom-Json)
                 }
+            }
+            catch { }
+
+            if ($flatQuestions.Count -gt 0) {
+                $qPerGap = [Math]::Max(1, [Math]::Floor($flatQuestions.Count / $batch.Count))
+                $qIdx = 0
+                foreach ($gap in $batch) {
+                    $assigned = 0
+                    while ($qIdx -lt $flatQuestions.Count -and $assigned -lt $qPerGap) {
+                        $q = $flatQuestions[$qIdx]
+                        $qIdx++
+                        $assigned++
+                        if ([string]::IsNullOrWhiteSpace($q)) { continue }
+                        $hash = Get-QuestionHash $q
+                        if (-not $questionHashes.ContainsKey($hash)) {
+                            $questionHashes[$hash] = $true
+                            $allQuestions += @{
+                                EntryPoint = $gap.Target
+                                Language   = "doc-gap"
+                                Question   = $q
+                                Category   = $gap.Type
+                                GapType    = $gap.Type
+                                Severity   = $gap.Severity
+                            }
+                        }
+                    }
+                }
+            }
+            else {
+                Write-Step "No questions parsed for batch $batchNum" "WARN"
             }
         }
 
-        Write-Step "Generated $($questions.Count) gap-filling questions ($($allQuestions.Count) total)" "OK"
+        Write-Step "Batch $batchNum complete ($($allQuestions.Count) total questions)" "OK"
     }
 
     Write-Progress -Activity "Generating gap-filling questions" -Completed
@@ -540,6 +600,71 @@ Example: ["What error handling patterns are used in this module, and what error 
     Write-Step "Saved $($allQuestions.Count) gap-filling questions to questions.json" "OK"
 
     return $allQuestions
+}
+
+function Get-QuestionHash {
+    <#
+    .SYNOPSIS
+        Returns a short SHA256 hash for deduplication of question text.
+    #>
+    param([string]$Text)
+    return [System.BitConverter]::ToString(
+        [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+            [System.Text.Encoding]::UTF8.GetBytes($Text.ToLower().Trim())
+        )
+    ).Substring(0, 16)
+}
+
+function New-SingleGapQuestions {
+    <#
+    .SYNOPSIS
+        Fallback: generates questions for a single gap when batched call fails.
+    #>
+    param(
+        [hashtable]$Gap,
+        [string]$WorkingDirectory
+    )
+
+    $genPrompt = ""
+    if ($Gap.Type -eq "UNDOCUMENTED_CODE") {
+        $genPrompt = @"
+The file '$($Gap.Target)' has NO documentation. Generate exactly $QuestionsPerGap questions that would produce complete documentation.
+Focus on: purpose, architecture, APIs, error handling, config, testing.
+Output ONLY a JSON array of strings.
+"@
+    }
+    elseif ($Gap.Type -eq "INCOMPLETE_DOC") {
+        $missingSections = $Gap.MissingSections -join ", "
+        $genPrompt = @"
+The doc '$($Gap.Target)' is INCOMPLETE, missing: $missingSections
+Generate exactly $QuestionsPerGap questions targeting those missing sections.
+Output ONLY a JSON array of strings.
+"@
+    }
+
+    $result = Invoke-CopilotWithRetry -Prompt $genPrompt -ModelName $script:SelectedModel -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
+    $questions = @()
+
+    if ($result.Success) {
+        try {
+            $output = $result.Output.Trim()
+            if ($output -match '\[[\s\S]*\]') {
+                $questions = @($Matches[0] | ConvertFrom-Json)
+            }
+        }
+        catch { }
+    }
+
+    return @($questions | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object {
+        @{
+            EntryPoint = $Gap.Target
+            Language   = "doc-gap"
+            Question   = $_
+            Category   = $Gap.Type
+            GapType    = $Gap.Type
+            Severity   = $Gap.Severity
+        }
+    })
 }
 
 # ─────────────────────────────────────────────
