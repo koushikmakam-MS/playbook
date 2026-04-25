@@ -296,6 +296,208 @@ function Save-BatchCheckpoint {
     Move-Item $tmpPath $cpPath -Force
 }
 
+# ─────────────────────────────────────────────
+# Region: Run Checkpoint (orchestrator-level resume)
+# ─────────────────────────────────────────────
+
+$script:RUN_CHECKPOINT_FILE = "run-checkpoint.json"
+$script:CHECKPOINT_SCHEMA_VERSION = 1
+
+function Get-RunCheckpointPath {
+    <#
+    .SYNOPSIS
+        Returns the path to the run checkpoint file for a given output root.
+    #>
+    param([Parameter(Mandatory)][string]$OutputRoot)
+    return Join-Path $OutputRoot $script:RUN_CHECKPOINT_FILE
+}
+
+function Get-RunCheckpoint {
+    <#
+    .SYNOPSIS
+        Reads the run checkpoint file if it exists and is valid.
+        Returns $null if no checkpoint, expired, or schema mismatch.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$OutputRoot,
+        [int]$MaxAgeDays = 7
+    )
+
+    $cpPath = Get-RunCheckpointPath -OutputRoot $OutputRoot
+    if (-not (Test-Path $cpPath)) { return $null }
+
+    try {
+        $cp = Get-Content $cpPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    catch {
+        Write-Verbose "Run checkpoint corrupt — ignoring: $($_.Exception.Message)"
+        return $null
+    }
+
+    # Schema version check
+    if (-not $cp.schemaVersion -or $cp.schemaVersion -ne $script:CHECKPOINT_SCHEMA_VERSION) {
+        Write-Verbose "Run checkpoint schema mismatch (got $($cp.schemaVersion), need $($script:CHECKPOINT_SCHEMA_VERSION))"
+        return $null
+    }
+
+    # Age check
+    if ($cp.startedAt) {
+        try {
+            $startDate = if ($cp.startedAt -is [DateTime]) {
+                $cp.startedAt
+            } else {
+                [DateTimeOffset]::Parse($cp.startedAt).DateTime
+            }
+            $age = (Get-Date) - $startDate
+            if ($age.TotalDays -gt $MaxAgeDays) {
+                Write-Verbose "Run checkpoint expired ($([Math]::Round($age.TotalDays,1)) days old)"
+                return $null
+            }
+        }
+        catch {
+            Write-Verbose "Could not parse checkpoint date: $($cp.startedAt)"
+        }
+    }
+
+    return $cp
+}
+
+function Test-RunCheckpointCompatible {
+    <#
+    .SYNOPSIS
+        Validates whether a checkpoint is compatible with the current run configuration.
+        Returns a hashtable with Compatible (bool) and Reasons (string[]).
+    #>
+    param(
+        [Parameter(Mandatory)]$Checkpoint,
+        [string]$Model,
+        [string]$Pack,
+        [int]$BatchSize,
+        [string]$Branch,
+        [string]$WorkDir
+    )
+
+    $reasons = @()
+
+    # Model match
+    if ($Checkpoint.model -and $Model -and $Checkpoint.model -ne $Model) {
+        $reasons += "Model changed: $($Checkpoint.model) → $Model"
+    }
+
+    # Pack match
+    if ($Checkpoint.pack -and $Pack -and $Checkpoint.pack -ne $Pack) {
+        $reasons += "Pack changed: $($Checkpoint.pack) → $Pack"
+    }
+
+    # Branch match
+    if ($Checkpoint.branch -and $Branch -and $Checkpoint.branch -ne $Branch) {
+        $reasons += "Branch changed: $($Checkpoint.branch) → $Branch"
+    }
+
+    # Verify repo path still valid
+    if ($Checkpoint.repoPath -and $WorkDir -and $Checkpoint.repoPath -ne $WorkDir) {
+        $reasons += "Repo path changed: $($Checkpoint.repoPath) → $WorkDir"
+    }
+
+    return @{
+        Compatible = ($reasons.Count -eq 0)
+        Reasons    = $reasons
+    }
+}
+
+function Save-RunCheckpoint {
+    <#
+    .SYNOPSIS
+        Atomically writes the run checkpoint file (write to .tmp then rename).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$OutputRoot,
+        [Parameter(Mandatory)][hashtable]$CheckpointData
+    )
+
+    $cpPath = Get-RunCheckpointPath -OutputRoot $OutputRoot
+    $tmpPath = "$cpPath.tmp"
+
+    # Ensure schema version is set
+    $CheckpointData['schemaVersion'] = $script:CHECKPOINT_SCHEMA_VERSION
+
+    $CheckpointData | ConvertTo-Json -Depth 10 | Set-Content $tmpPath -Encoding UTF8
+    Move-Item $tmpPath $cpPath -Force
+}
+
+function Remove-RunCheckpoint {
+    <#
+    .SYNOPSIS
+        Deletes the run checkpoint file (for fresh starts).
+    #>
+    param([Parameter(Mandatory)][string]$OutputRoot)
+
+    $cpPath = Get-RunCheckpointPath -OutputRoot $OutputRoot
+    if (Test-Path $cpPath) {
+        Remove-Item $cpPath -Force
+        Write-Verbose "Removed run checkpoint: $cpPath"
+    }
+}
+
+function Show-RunCheckpointSummary {
+    <#
+    .SYNOPSIS
+        Displays a summary of a run checkpoint for resume prompts.
+    #>
+    param([Parameter(Mandatory)]$Checkpoint)
+
+    $monkeys = $Checkpoint.monkeys
+    if (-not $monkeys) { return }
+
+    $completedCount = 0
+    $inProgressCount = 0
+    $pendingCount = 0
+    $monkeyProps = if ($monkeys -is [hashtable]) { $monkeys.Keys } else { $monkeys.PSObject.Properties.Name }
+
+    foreach ($mId in $monkeyProps) {
+        $mData = if ($monkeys -is [hashtable]) { $monkeys[$mId] } else { $monkeys.$mId }
+        switch ($mData.status) {
+            'complete'    { $completedCount++ }
+            'in-progress' { $inProgressCount++ }
+            default       { $pendingCount++ }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Yellow
+    Write-Host "  ║       🔖 PREVIOUS RUN CHECKPOINT DETECTED          ║" -ForegroundColor Yellow
+    Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Started:   $($Checkpoint.startedAt)" -ForegroundColor DarkGray
+    Write-Host "  Model:     $($Checkpoint.model)" -ForegroundColor DarkGray
+    Write-Host "  Pack:      $($Checkpoint.pack)" -ForegroundColor DarkGray
+    Write-Host "  Branch:    $($Checkpoint.branch)" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Progress:" -ForegroundColor White
+    Write-Host "    ✅ Completed:   $completedCount" -ForegroundColor Green
+    Write-Host "    🔄 In-progress: $inProgressCount (will be re-run)" -ForegroundColor Yellow
+    Write-Host "    ⏳ Pending:     $pendingCount" -ForegroundColor DarkGray
+    Write-Host ""
+
+    # Show per-monkey detail
+    foreach ($mId in $monkeyProps) {
+        $mData = if ($monkeys -is [hashtable]) { $monkeys[$mId] } else { $monkeys.$mId }
+        $icon = switch ($mData.status) {
+            'complete'     { '✅' }
+            'in-progress'  { '🔄' }
+            default        { '⏳' }
+        }
+        $detail = ""
+        if ($mData -is [hashtable] -and $mData.ContainsKey('completedAt') -and $mData['completedAt']) {
+            $detail = " ($($mData['completedAt']))"
+        } elseif ($mData -isnot [hashtable] -and $mData.PSObject.Properties['completedAt'] -and $mData.completedAt) {
+            $detail = " ($($mData.completedAt))"
+        }
+        Write-Host "    $icon $mId$detail" -ForegroundColor $(if ($mData.status -eq 'complete') { 'Green' } elseif ($mData.status -eq 'in-progress') { 'Yellow' } else { 'DarkGray' })
+    }
+    Write-Host ""
+}
+
 function Invoke-CopilotBatch {
     <#
     .SYNOPSIS
@@ -2005,6 +2207,12 @@ Export-ModuleMember -Function @(
     'Get-QuestionId'
     'Get-BatchCheckpoint'
     'Save-BatchCheckpoint'
+    'Get-RunCheckpoint'
+    'Get-RunCheckpointPath'
+    'Save-RunCheckpoint'
+    'Remove-RunCheckpoint'
+    'Test-RunCheckpointCompatible'
+    'Show-RunCheckpointSummary'
     'Get-IncrementalState'
     'Save-IncrementalState'
     'Get-ChangedFiles'

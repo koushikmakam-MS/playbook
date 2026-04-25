@@ -80,7 +80,8 @@ param(
     [int]$CallTimeout = 300,
     [int]$BatchSize = 5,
     [switch]$Incremental,
-    [string]$Since
+    [string]$Since,
+    [switch]$Resume
 )
 
 $ErrorActionPreference = "Stop"
@@ -177,6 +178,7 @@ function Build-MonkeyArgs {
         ShowVerbose   = 'ShowVerbose'
         ForcePlaybook = 'ForcePlaybook'
         Incremental   = 'Incremental'
+        Resume        = 'Resume'
     }
     foreach ($key in $switchMap.Keys) {
         $targetParam = $switchMap[$key]
