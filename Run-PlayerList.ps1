@@ -77,7 +77,8 @@ param(
     [string[]]$TargetAgents,
     [int]$MaxRetries = 3,
     [int]$RetryBaseDelay = 30,
-    [int]$CallTimeout = 300
+    [int]$CallTimeout = 300,
+    [int]$BatchSize = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -154,6 +155,7 @@ function Build-MonkeyArgs {
         QuestionsPerGap         = 'QuestionsPerGap'
         QuestionsPerFile        = 'QuestionsPerFile'
         GeorgeQuestionsPerDomain = 'GeorgeQuestionsPerDomain'
+        BatchSize               = 'BatchSize'
     }
 
     foreach ($key in $paramMap.Keys) {

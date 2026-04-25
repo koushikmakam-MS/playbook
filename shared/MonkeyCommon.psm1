@@ -1830,7 +1830,7 @@ function Get-ArmyConfig {
         }
         else { $config.QuestionsPerFile = 5 }
 
-        Write-Step "Tuning: Rafiki=$($config.QuestionsPerEntry)/entry, Abu=$($config.QuestionsPerGap)/gap, Mojo=$($config.QuestionsPerFile)/file" "OK"
+        Write-Step "Tuning: Rafiki=$($config.QuestionsPerEntry)/entry, Abu=$($config.QuestionsPerGap)/gap, Mojo=$($config.QuestionsPerFile)/file, Batch=$($config.BatchSize)" "OK"
     }
 
     # ═══════════════════════════════════════════
