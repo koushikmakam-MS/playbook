@@ -1,0 +1,12 @@
+# Monkey Army runtime artifacts
+.monkey-output/
+*.log
+*.tmp
+
+# PowerShell module cache
+*.psm1.cache
+
+# OS artifacts
+Thumbs.db
+.DS_Store
+desktop.ini

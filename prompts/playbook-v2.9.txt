@@ -1,0 +1,1592 @@
+═══════════════════════════════════════════════════════════════
+📋 COPILOT AGENT KNOWLEDGE LAYER — REUSABLE PLAYBOOK  v2.9
+═══════════════════════════════════════════════════════════════
+
+Bootstrap an AI-native knowledge layer for any codebase so that GitHub
+Copilot (and new devs) can navigate, code, debug, and review with full
+context.
+
+Prerequisite: GitHub Copilot Chat in AGENT MODE (not Ask/Edit).
+
+How to use:
+- Copy each prompt into Copilot Chat, run phases in order (0→6).
+- Replace «double angle brackets» with your repo's values. DELETE examples.
+- Designed for end-to-end single session or split via anchor-file resume.
+
+
+═══════════════════════════════════════════════════════════════
+🚨 DEEP ANALYSIS MANDATE (applies to ALL phases — never skip)
+═══════════════════════════════════════════════════════════════
+
+This playbook produces a KNOWLEDGE LAYER — not a summary layer. Every
+phase must go DEEP. If you find yourself skimming, listing file names
+without reading contents, or producing thin output, you are doing it
+wrong. Stop and redo.
+
+SOURCE READING — DEPTH OVER BREADTH:
+  - NEVER describe a file you haven't read. Open it, read 50+ lines
+    of method bodies — not just imports, class signatures, or comments.
+  - For every claim you write (class name, method call, config key,
+    error code), you MUST have seen it in actual source code.
+  - When a flow spans multiple files (controller → BL → impl), READ
+    EACH HOP. Don't infer what the next layer does from its name.
+  - Read METHOD BODIES. The valuable content is inside conditionals,
+    catch blocks, null checks, retry loops, and config lookups —
+    not in class declarations or using statements.
+  - If a file is 500+ lines, read the key methods (entry points,
+    error handlers, state transitions) — don't skip to the next file.
+
+OUTPUT QUALITY — NO THIN CONTENT:
+  - Every table cell must contain REAL data from source code, not
+    placeholders like "TBD", "see code", or "various".
+  - Every workflow flow section must have ≥5 steps with real method
+    names and file paths. A 3-step flow means you didn't read deep
+    enough.
+  - Every error scenarios table must have ≥3 rows with real error
+    codes found in catch blocks, not generic "invalid input" entries.
+  - Every config dependencies table must list ACTUAL config keys read
+    from config files (e.g., AppConfig, appsettings), not guessed property names.
+  - Code exemplars must cite REAL file paths and show REAL code
+    patterns — not generic templates.
+
+VERIFICATION — PROVE YOUR WORK:
+  - When you write "method X calls Y", you must have seen the call
+    site. Cite the file and approximate line range.
+  - When you write "config key Z controls behavior W", you must have
+    seen where Z is read in code AND where it affects logic.
+  - If you can't verify a claim, DON'T WRITE IT. An empty cell is
+    better than a hallucinated one.
+  - After completing any doc, re-read your output and ask: "Could I
+    debug a production issue using ONLY this doc?" If no → add detail.
+
+COMPLETENESS — NO PHASE SHORTCUTS:
+  - Every phase has a defined OUTPUT format (table, file, list).
+    Produce the FULL output, not a summary of what you would produce.
+  - Quality loops and follow-ups are NOT optional. They exist because
+    the first pass always misses things.
+  - If a phase says "per domain" or "per doc", run it for EVERY domain
+    and EVERY doc — don't pick 2 of 10 and call it done.
+  - If you hit context limits mid-phase, STOP and tell the user to
+    resume with SCOPE narrowed — don't silently produce shallow output
+    for the remaining items.
+
+ANTI-PATTERNS (if you catch yourself doing these, stop and redo):
+  - Listing 20 files but only reading 3 → Read all or split into batches
+  - Writing "handles errors" without listing which error codes → Read catch blocks
+  - Copying class XML doc comments as your documentation → Read the method body
+  - Producing a workflow with steps like "processes the request" → Name the method
+  - Skipping the follow-up/quality loop → It's mandatory, not optional
+  - Saying "similar to above" or "follows same pattern" → Document it explicitly
+  - Generating config tables from parameter names alone → Read where they're used
+
+
+═══════════════════════════════════════════════════════════════
+🧠 LARGE REPO STRATEGY (100K+ lines)
+═══════════════════════════════════════════════════════════════
+
+  1. CHUNKED: Phase 2 in batches of 3–5 domains, Phase 4 one doc at a time.
+  2. ANCHOR: Each phase re-reads "Repo Map" + "Identified Domains" from the
+     Discovery Manifest — not the full file.
+  3. MANIFEST-DRIVEN: Phase 0 manifest grounds all later phases in real paths.
+     Update it if later phases discover new domains.
+  4. SCOPE LIMITERS: Each prompt has a SCOPE line — use it to focus the agent.
+  5. SESSION RESUME: New session → "Read .github/copilot-instructions.md and
+     Repo Map + Identified Domains of {DOCS_ROOT}/Discovery_Manifest.md.
+     DOCS_ROOT={DOCS_ROOT}, SKILLS_ROOT={SKILLS_ROOT}. Continue Phase N."
+  6. PARTIAL FAILURE: Don't re-run the full phase — re-run with SCOPE
+     narrowed to only the missing items.
+
+
+═══════════════════════════════════════════════════════════════
+📊 ESTIMATED TIME & CONTEXT PER PHASE
+═══════════════════════════════════════════════════════════════
+
+  | Phase | Time | Weight | Splittable? |
+  |-------|------|--------|-------------|
+  | 0 Discovery      | 5–10 min  | Light  | No  |
+  | 1 Scaffold       | 15–25 min | Heavy  | No  |
+  | 1 Quality Loop   | 5–10 min  | Medium | No  |
+  | 2 Workflows      | 10–15 min/batch | Heavy | Yes (3–5 domains) |
+  | 2 Audit+Reval    | 5–10 min  | Medium | No  |
+  | 2B Doc Registry  | 5–10 min  | Medium | No  |
+  | 2C ADRs          | 10–20 min | Heavy  | Yes (5 ADRs/batch) |
+  | 3A Skill Audit   | 5 min     | Light  | No  |
+  | 3B Skill Creation| 10–15 min | Medium | No  |
+  | 3 Cross-ref      | 5 min     | Light  | No  |
+  | 4A–D Validation  | 5–10 min/doc | Heavy | Yes (per doc) |
+  | 4E Curiosity 🐵  | 15–30 min | Heavy  | Yes (per domain) — GATE |
+  | 5 Maintenance    | 5 min     | Light  | No  |
+  | 6 Git Tracking   | 5 min     | Light  | No  |
+  | 7 Push & PR      | 2–5 min   | Light  | No  |
+
+  128K context: 1–2 sessions. 32K context: split Phase 2 (2–3 domains),
+  Phase 4 strictly per-doc, consider splitting Phase 1.
+
+
+═══════════════════════════════════════════════════════════════
+BEFORE YOU START: Interactive Path Selection
+═══════════════════════════════════════════════════════════════
+
+Prompt:
+
+  I want to set up an AI-native knowledge layer for this repo. Before we
+  build anything, help me decide where to put the files.
+
+  1. Scan for existing docs and Copilot assets:
+     - docs/, documentation/, wiki/ folders
+     - .github/copilot-instructions.md or copilot-memory.md
+     - SKILL.md files anywhere
+     - README.md files with architecture content
+
+  2. Ask the user for a KNOWLEDGE BASE NAME:
+     "What should the knowledge base folder be called?
+      This becomes the subfolder under docs/ for all workflow docs,
+      architecture references, and validation reports.
+      Examples: knowledge, copilot-docs, agent-docs, kb
+      (default: knowledge)"
+
+  3. RECOMMEND paths using the knowledge base name:
+     DOCS_ROOT: if docs exist → same parent + KB name; else → docs/«KB_NAME»;
+                monorepos → per-service with shared index
+     SKILLS_ROOT: if SKILL.md exists → same parent; else → .github/skills
+
+  4. Present: DOCS_ROOT recommendation + reason, SKILLS_ROOT recommendation
+     + reason, existing assets found.
+
+  NON-GITHUB REPOS: This defaults to .github/copilot-instructions.md.
+  Azure DevOps → .azuredevops/ or root. GitLab → .gitlab/ or root.
+  Copilot reads .github/copilot-instructions.md regardless of host.
+
+  OUTPUT: Recommendations only — don't create files yet.
+
+After reviewing, confirm:
+
+  Confirmed. DOCS_ROOT = «path» , SKILLS_ROOT = «path»
+
+  PATH SUBSTITUTION: Before pasting prompts below, find-and-replace
+  {DOCS_ROOT} and {SKILLS_ROOT} with your confirmed values. If using
+  defaults (docs/knowledge for DOCS_ROOT, .github/skills for SKILLS_ROOT),
+  prompts work as-is.
+
+  BRANCH SELECTION: Do you want to work on:
+  (a) Current branch — make changes directly here
+  (b) New branch — create a feature branch for the knowledge layer
+
+  If (b): create a branch named `feature/copilot-knowledge-layer` (or a
+  name of your choice) and switch to it before proceeding. Run:
+    git checkout -b «branch-name»
+
+  Proceed to Phase 0.
+
+
+═══════════════════════════════════════════════════════════════
+PHASE 0: Discovery Manifest
+═══════════════════════════════════════════════════════════════
+
+Prompt:
+
+  Create a discovery manifest — the anchor file for all subsequent phases.
+
+  Paths: DOCS_ROOT={DOCS_ROOT}, SKILLS_ROOT={SKILLS_ROOT}
+  Use these for ALL file creation in every phase.
+
+  SCOPE: «blank for full repo, or specify folders»
+
+  1. Scan repo top-down. Per major folder record: path, purpose, file
+     count, primary language, key entry points.
+
+  2. Detect existing knowledge assets:
+     - .github/copilot-instructions.md — Y/N, line count
+     - .github/copilot-memory.md — Y/N, line count
+     - SKILL.md files — list with paths
+     - docs/ folders — list with file counts
+     - README.md with architecture info — list
+     - Existing workflow/API/runbook docs
+
+  3. Detect tech stack from actual files (don't guess):
+     Languages, frameworks, test frameworks, CI/CD.
+
+  3B. DOMAIN DISCOVERY ALGORITHM (advisory — use when grouping is ambiguous):
+
+     Most codebases have obvious domain boundaries. Use this algorithm
+     as a TIEBREAKER when it's unclear whether controllers should be
+     merged, split, or standalone. Also useful for consistency when
+     multiple people run the playbook on the same repo.
+
+     STEP 1 — FIND ENTRY POINTS:
+     Scan for the framework's HTTP entry points:
+       | Framework | Entry Point Pattern | Downstream Pattern |
+       |-----------|--------------------|-----------------------|
+       | ASP.NET Core | *Controller.cs | *Impl.cs, *Service.cs, *Provider.cs |
+       | Spring Boot | *Controller.java | *Service.java, *Repository.java |
+       | FastAPI / Django | routes/*.py, views.py | services/*.py |
+       | Express / NestJS | *.controller.ts | *.service.ts |
+       | Go (Chi/Gin) | *_handler.go | *_service.go |
+     Each entry point file = candidate domain.
+
+     STEP 2 — GROUP BY SHARED DOWNSTREAM:
+     For each entry point, trace 1-2 levels down (BL → impl/service).
+     If 2+ controllers share the SAME impl/service class → MERGE into
+     one domain named after the shared impl.
+       Example: RestoreController + RecoveryPointController both call
+       RestoreImpl.cs → domain = "Restore & RecoveryPoints"
+
+     STEP 3 — SPLIT BY ACTION DIVERGENCE:
+     If one controller's actions route to 2+ DIFFERENT impl classes
+     with unrelated logic → SPLIT into separate domains.
+       Example: BackupInstanceController routes CRUD to BackupInstanceImpl
+       but suspend/resume to BackupInstanceSuspendResumeImpl → 2 domains.
+       Heuristic: if the impl files share <30% of their dependencies
+       (config reads, entity types, telemetry classes), they're separate.
+
+     STEP 4 — NAME THE DOMAIN:
+     Priority order:
+       a. ARM resource type (backupInstances, backupPolicies, protectedItems)
+       b. Shared impl class name (minus "Impl" suffix)
+       c. Controller name (minus "Controller" suffix)
+
+     STEP 5 — HANDLE NON-CONTROLLER DOMAINS:
+       - Design patterns (cross-region proxy, plugin architecture) →
+         domain = the pattern name, doc type = "design"
+       - Shared infrastructure (auth, telemetry, config) →
+         domain = reference doc, not workflow doc, doc type = "reference"
+       - Background workers/jobs → domain per worker type
+
+     STEP 6 — OUTPUT: DOMAIN ROSTER TABLE
+       | # | Domain Name | Entry Points | Shared Impl | Doc Type |
+       Doc Type = "workflow" (has API surface) or "design" (internal
+       pattern) or "reference" (shared infrastructure)
+
+     Save the domain roster in the Discovery Manifest under
+     "Identified Domains" using this table format.
+
+  4. Save to `{DOCS_ROOT}/Discovery_Manifest.md`:
+     - Repo Map (folder → purpose table)
+     - Existing Knowledge Assets
+     - Tech Stack Summary
+     - Identified Domains (features to document in Phase 2)
+     - Last Updated: «date»
+
+  This is your ANCHOR — re-read its "Repo Map" and "Identified Domains"
+  at the start of every subsequent phase. Update it if you discover new
+  domains later.
+
+  OUTPUT: Create file. List: file path, domains identified, assets found.
+  Proceed to Phase 1.
+
+
+═══════════════════════════════════════════════════════════════
+PHASE 1: Scaffold the Knowledge Infrastructure
+═══════════════════════════════════════════════════════════════
+
+Prompt:
+
+  Re-read "Repo Map" + "Identified Domains" from
+  `{DOCS_ROOT}/Discovery_Manifest.md`.
+
+  Build the AI-native knowledge layer for this repo.
+
+  About this repo (DELETE examples, fill in yours):
+  - Language/Framework: «C# .NET 8 | Python FastAPI | TypeScript Node.js»
+  - Architecture: «MVC | Clean Architecture | Microservices»
+  - Key domains: «Payments, Backup Management, Identity»
+  - Test framework: «MSTest | xUnit | pytest | Jest»
+  - Deployment: «Service Fabric | Kubernetes | Azure Functions»
+
+  Paths: DOCS_ROOT={DOCS_ROOT}/, SKILLS_ROOT={SKILLS_ROOT}/
+
+  STEP A — Detect existing assets:
+  Check Discovery Manifest "Existing Knowledge Assets" + scan for
+  copilot-instructions.md, copilot-memory.md, SKILL.md, docs/.
+  DO NOT overwrite — MERGE into existing files. IMPROVE existing skills
+  rather than duplicating.
+
+  STEP B — Create or update:
+
+  1. `.github/copilot-instructions.md` — Codebase overview, architecture
+     rules, naming conventions table, telemetry requirements, error handling
+     rules, testing rules, anti-patterns table, doc self-healing triggers,
+     **Response Style rules** (concise answers, tables over prose, no
+     narration, no triple-stating, 1-line edit summaries).
+
+     SKILL TABLE WIRING: If existing skills were found in Phase 0, the
+     skill table MUST use their ACTUAL paths (which may differ from
+     {SKILLS_ROOT}/). Only new skills created by this playbook live
+     under {SKILLS_ROOT}/. Mixed paths in the skill table are expected
+     and correct.
+
+  2. `.github/copilot-memory.md` — Architecture layers + key paths, data
+     flow diagram, dependencies graph, patterns, important files table.
+
+  3. `{DOCS_ROOT}/` docs:
+     - `Architecture_Memory.md` — Full architecture reference
+     - `Telemetry_And_Logging_Reference.md` — Log tables, correlation keys, queries
+     - `ErrorCode_Reference.md` — Error catalog: meaning, cause, debug steps
+     - `Glossary.md` — Acronyms and domain terms
+     - `exemplars/Code_Exemplars.md` — Gold-standard examples per layer from
+       REAL code (cite file paths, no generic templates)
+
+  SOURCE READING: Read 5+ files per layer. Prefer recently modified files
+  with tests. For exemplars, pick the BEST example of each pattern.
+
+  OUTPUT: Create all files. List: files created, files merged into, key
+  decisions.
+
+
+>> FOLLOW-UP — Quality Loop:
+
+  Re-read "Repo Map" from `{DOCS_ROOT}/Discovery_Manifest.md`.
+
+  For each file from Phase 1: pick 3 claims (class names, paths, config
+  keys) and VERIFY by reading actual source. Fix anything wrong. Add
+  detail where thin.
+
+  OUTPUT — VERIFICATION TABLE:
+  | Document | Claim Checked | Source File Read | Result (CORRECT/FIXED/ADDED) |
+
+  Proceed to Phase 2.
+
+
+═══════════════════════════════════════════════════════════════
+PHASE 2: Workflow Documentation
+═══════════════════════════════════════════════════════════════
+
+Run in BATCHES of 3–5 domains. Re-read anchor sections each batch.
+
+Prompt:
+
+  Re-read "Repo Map" + "Identified Domains" from
+  `{DOCS_ROOT}/Discovery_Manifest.md` and architecture rules from
+  `.github/copilot-instructions.md`.
+
+  Create workflow docs in `{DOCS_ROOT}/workflows/` with README index.
+
+  SCOPE: «3–5 domains, e.g., "BackupInstance, BackupPolicy, Restore"
+          — small repos can list all at once»
+
+  SOURCE READING: Per domain read controller + service/BL + downstream
+  dependency (min 3 files). More if flow branches.
+
+  Each workflow doc includes:
+  - Trigger Points
+  - API Endpoints table (operation, method, route, constants)
+  - Request/Response Flow (step-by-step with real code paths)
+    **WITH Mermaid sequence diagram** — every flow section MUST include
+    a ```mermaid sequence diagram showing the call chain across layers.
+    Example:
+    ```mermaid
+    sequenceDiagram
+      participant Client
+      participant Controller
+      participant BL as Business Logic
+      participant Impl as VaultImpl
+      participant Plugin
+      Client->>Controller: DELETE /backupInstances/{name}
+      Controller->>BL: DeleteBackupInstanceInternal()
+      BL->>Impl: PurgeBackupInstanceInternal()
+      Impl->>Plugin: DoDeleteBackupInstanceOperation()
+      Plugin-->>Impl: AsyncStatus{Succeeded}
+      Impl-->>BL: Response(200 OK)
+    ```
+    Rules for Mermaid diagrams:
+    - Use REAL method names from source code (not generic "process request")
+    - Show decision points with alt/opt blocks for branching logic
+    - Include error paths (catch blocks, fallbacks) as alt branches
+    - Show config checks that change flow direction
+    - Minimum 4 participants for any cross-layer flow
+    - For complex flows, split into multiple diagrams (happy path + error path)
+  - Key Source Files table
+  - Configuration Dependencies table
+  - Telemetry & Logging
+  - How to Debug (with ready-to-use queries)
+  - Error Scenarios table (error → cause → debug steps)
+  - **Architecture Decision Notes** — if the workflow has non-obvious design
+    choices (e.g., "why does force delete bypass store settings?", "why is
+    soft delete checked before force delete?"), add a brief note with context.
+    These feed into the ADR system (Phase 2C).
+
+  Use real class/method names and file paths. Number sequentially (01_, 02_...).
+  Update Discovery Manifest if new domains found.
+
+  OUTPUT: List files created, domains covered, new domains discovered.
+
+
+>> FOLLOW-UP — Standards Audit:
+
+  Audit all workflow docs for missing sections (Config Dependencies,
+  Telemetry, Debug, Errors). Fix them.
+
+  OUTPUT — STANDARDS AUDIT TABLE:
+  | Workflow Doc | Missing Sections | Fixed? |
+
+
+>> FOLLOW-UP — Revalidation:
+
+  For each workflow doc, reverse-check against code: extract every class,
+  method, path, config key, constant. Verify each exists. Fix wrong refs,
+  add incomplete details, note missed code paths.
+
+  OUTPUT — REVALIDATION TABLE:
+  | Doc | Claims Checked | Corrections Made | Paths Added |
+
+  Proceed to Phase 2B.
+
+
+═══════════════════════════════════════════════════════════════
+PHASE 2B: Documentation Registry
+═══════════════════════════════════════════════════════════════
+
+Create the documentation registry — a living inventory that tracks which
+controllers/features have docs, section completeness, and staleness.
+This is the single source of truth for doc health. Updated by every
+subsequent phase (Monkey, Maintenance, PR validation).
+
+Prompt:
+
+  Re-read "Repo Map" + "Identified Domains" from
+  `{DOCS_ROOT}/Discovery_Manifest.md`.
+
+  Create `{DOCS_ROOT}/doc_registry.md` with the following structure:
+
+  ────────────────────────────────────────────────────────────
+  <!-- Last verified against code: «date» -->
+  # Documentation Registry
+
+  > Tracks which controllers/features have workflow docs, section
+  > completeness, and freshness.
+  > Updated automatically during doc self-healing and proactive audits.
+  > **Last audit: «date»**
+
+  ---
+
+  ## «Domain 1 Name» (e.g., DPP / Backup Vault) Controllers
+
+  ### Documented Controllers
+
+  | Controller / Feature | Workflow Doc | Exists? | Sections (of 14) | Last Verified |
+  |----------------------|-------------|---------|-------------------|---------------|
+  | «ControllerName»     | `«domain»/workflows/«filename»` | ✅ | N/14 | «date» |
+
+  ### ❌ Undocumented Controllers/Features
+
+  | Controller / Feature | Source Location | Suggested Action |
+  |----------------------|-----------------|-----------------|
+  | «ControllerName»     | `«path»/`       | New workflow doc / Add section to #NN |
+
+  (Repeat Documented + Undocumented tables for each domain: DPP, RSV, etc.)
+
+  ---
+
+  ## Section Completeness (Sampled Docs)
+
+  | Missing Section | Frequency (of N sampled) |
+  |----------------|--------------------------|
+  | «section name» | X/N |
+
+  The 14 standard sections are:
+    1. Overview  2. API Endpoints  3. Request/Response Flow
+    4. Key Source File References  5. User-Facing Models (DTOs)
+    6. Database Models  7. Configuration Dependencies
+    8. CAL Operations  9. External Service Interactions
+    10. Telemetry & Monitoring  11. Error Scenarios
+    12. FM Operation IDs  13. Kusto Debugging Queries
+    14. Related Documentation
+
+  ---
+
+  ## Coverage Summary
+
+  | Metric | «Domain 1» | «Domain 2» | Total |
+  |--------|-------------|-------------|-------|
+  | Total controllers found     | N | N | N |
+  | Controllers with workflow docs | N | N | N |
+  | Undocumented controllers    | N | N | N |
+  | Doc coverage (by controller)| N% | N% | N% |
+  | Docs with all 14 sections   | N/M | N/M | N/M |
+  | Docs with `last-verified`   | N/M | N/M | N/M |
+  | Avg sections present        | N/14 | N/14 | N/14 |
+
+  > **Assessment:** «emoji» «one-line coverage verdict»
+  ────────────────────────────────────────────────────────────
+
+  HOW TO POPULATE (follow this algorithm):
+
+  1. SCAN CONTROLLERS: Find ALL entry point files (e.g., *Controller.cs)
+     in the source tree. Extract class name and public action methods.
+     Group by domain using the Domain Discovery Algorithm (Phase 0, 3B).
+
+  2. DIFF AGAINST DOCS: For each controller, check if a workflow doc
+     in {DOCS_ROOT}/workflows/ covers it (exact section or entire doc).
+     Mark as ✅ Documented or ❌ Undocumented.
+
+  3. COUNT SECTIONS: For each existing workflow doc, count how many of
+     the 14 standard sections are present. Record N/14.
+
+  4. SUGGESTED ACTIONS: For undocumented controllers, determine:
+     - If a related workflow doc exists → "Add section to #NN"
+     - If no related doc → "New workflow doc"
+     - If already documented elsewhere (cross-check) → strike through
+       with "✅ Documented in #NN (doc name)"
+
+  5. SAMPLE COMPLETENESS: Pick 10+ docs (or all if fewer), tally which
+     of the 14 sections are most frequently missing.
+
+  6. COMPUTE COVERAGE: Fill the Coverage Summary table with counts and %.
+
+  VERIFICATION: Every controller listed in the registry MUST exist in
+  source code. Run `grep -r "class.*Controller" src/` (or equivalent)
+  to confirm. Do NOT list controllers from memory or docs alone.
+
+  OUTPUT: `{DOCS_ROOT}/doc_registry.md` created. Print coverage summary.
+
+  Proceed to Phase 2C.
+
+
+═══════════════════════════════════════════════════════════════
+PHASE 2C: Architecture Decision Records (ADRs)
+═══════════════════════════════════════════════════════════════
+
+Capture the WHY behind design decisions. Workflow docs explain HOW code
+works; ADRs explain WHY it was built that way. This prevents re-debates,
+helps new devs understand trade-offs, and preserves institutional knowledge.
+
+Prompt:
+
+  Re-read "Repo Map" + "Identified Domains" from
+  `{DOCS_ROOT}/Discovery_Manifest.md`.
+
+  Create the ADR system in `{DOCS_ROOT}/adr/`:
+
+  STEP 1 — Create ADR template and index:
+
+  Create `{DOCS_ROOT}/adr/README.md`:
+  ────────────────────────────────────────────────────────────
+  # Architecture Decision Records
+
+  > Each ADR captures a significant design decision: the context,
+  > the decision made, the alternatives considered, and the consequences.
+  > ADRs are numbered sequentially and NEVER deleted — superseded ADRs
+  > are marked with status "Superseded by ADR-NNNN".
+
+  ## Index
+
+  | ADR | Title | Status | Date |
+  |-----|-------|--------|------|
+  | 0001 | ADR Template | Accepted | «date» |
+
+  ## How to Add a New ADR
+  1. Copy `0001-adr-template.md`
+  2. Number sequentially (next: NNNN)
+  3. Fill in all sections — especially Alternatives Considered
+  4. Set status to "Proposed" until reviewed, then "Accepted"
+  5. Update this README index
+  ────────────────────────────────────────────────────────────
+
+  Create `{DOCS_ROOT}/adr/0001-adr-template.md`:
+  ────────────────────────────────────────────────────────────
+  # ADR-0001: «Title»
+
+  **Status:** Accepted | Proposed | Deprecated | Superseded by ADR-NNNN
+  **Date:** «YYYY-MM-DD»
+  **Author:** «name or team»
+  **Related:** «workflow doc, config property, or code path»
+
+  ## Context
+  What is the problem or situation that prompted this decision?
+  What constraints exist?
+
+  ## Decision
+  What was decided? Be specific — name the pattern, config, class,
+  or approach chosen.
+
+  ## Alternatives Considered
+  | Alternative | Pros | Cons | Why Rejected |
+  |-------------|------|------|-------------|
+  | «option A» | ... | ... | ... |
+  | «option B» | ... | ... | ... |
+
+  ## Consequences
+  - **Positive:** What does this enable?
+  - **Negative:** What trade-offs were accepted?
+  - **Risks:** What could go wrong?
+
+  ## References
+  - Source files: «paths»
+  - Workflow doc: «link»
+  - Related ADRs: «links»
+  ────────────────────────────────────────────────────────────
+
+  STEP 2 — Mine existing code for architectural decisions:
+
+  Read the workflow docs from Phase 2 and source code to discover
+  decisions that should be recorded. Look for:
+  - NON-OBVIOUS PATTERNS: "Why does delete check soft-delete before
+    force-delete?" "Why is there a separate plugin per datasource type?"
+  - CONFIG-DRIVEN BEHAVIOR: "Why is this behind a feature flag?"
+    "Why does this config default to false?"
+  - ERROR HANDLING CHOICES: "Why does this catch block allow cleanup
+    on force purge?" "Why swallow this specific error?"
+  - ARCHITECTURE BOUNDARIES: "Why is business logic in VaultImpl
+    instead of Controller?" "Why a plugin architecture for datasources?"
+  - CROSS-COMPONENT CONTRACTS: "Why does Fabric WF use async status
+    polling instead of callbacks?"
+  - SECURITY DECISIONS: "Why is MUA required for delete but not create?"
+  - MIGRATION/COMPATIBILITY: "Why does this brownfield check exist?"
+    "Why support both v1 and v2 API versions?"
+
+  For each discovered decision, check:
+  - Is the RATIONALE documented anywhere (comments, PR descriptions, docs)?
+  - If YES → extract and formalize into an ADR
+  - If NO → infer from code context, mark as "Inferred — verify with team"
+
+  STEP 3 — Create initial ADRs:
+
+  Create 5–10 ADRs for the most significant decisions discovered.
+  Start numbering from 0002 (0001 is the template).
+  Prioritize decisions that:
+  - New developers would ask "why?" about
+  - Have non-obvious trade-offs
+  - Are config-controlled (flag could be changed, need to know why it's set)
+  - Span multiple components or workflows
+
+  Include Mermaid diagrams where they clarify the decision:
+  - Use flowcharts for decision trees / branching logic
+  - Use sequence diagrams for cross-component interaction choices
+
+  Example Mermaid in ADR:
+  ```mermaid
+  flowchart TD
+    A[Delete BI Request] --> B{Soft Delete Enabled?}
+    B -->|Yes| C[Soft Delete Flow]
+    B -->|No| D{Force Delete?}
+    D -->|Yes| E[Direct Cleanup]
+    D -->|No| F[Normal Purge via Fabric WF]
+  ```
+
+  STEP 4 — Update README index with all created ADRs.
+
+  STEP 5 — Cross-reference:
+  - In each workflow doc's "Architecture Decision Notes" section,
+    link to relevant ADRs
+  - In each ADR's "References" section, link to relevant workflow docs
+
+  VERIFICATION: Every ADR must cite at least one source file where the
+  decision is implemented. No ADR should describe a decision that can't
+  be traced to actual code.
+
+  OUTPUT:
+  - `{DOCS_ROOT}/adr/README.md` — index
+  - `{DOCS_ROOT}/adr/0001-adr-template.md` — template
+  - `{DOCS_ROOT}/adr/0002-*.md` through `{DOCS_ROOT}/adr/NNNN-*.md` — initial ADRs
+  - Count: N ADRs created, N workflow docs cross-referenced
+  - Print ADR SUMMARY TABLE:
+    | ADR | Title | Decision | Key Trade-off |
+
+  Proceed to Phase 3A.
+
+
+═══════════════════════════════════════════════════════════════
+PHASE 3A: Copilot Skills — Overlap Audit (read-only)
+═══════════════════════════════════════════════════════════════
+
+🛑 HARD RULE — MERGE FIRST, CREATE NEVER (unless proven unique):
+  Before creating ANY new skill, you MUST prove no existing skill covers
+  the same purpose. If an existing skill covers ≥50% of the target's
+  purpose, MERGE into it — add sections, update Knowledge Sources,
+  strengthen rules. NEVER create a parallel skill for the same concern.
+
+  WHY: Two skills matching the same user query cause unpredictable
+  routing — Copilot picks one based on description keywords, and the
+  user has no control over which wins. One well-structured skill with
+  multiple sections beats two overlapping skills every time.
+
+  Common overlap traps (non-exhaustive):
+  - Doc management + knowledge Q&A → one skill with both sections
+  - Coding standards + linting rules → one skill covering both
+  - Test generation + coverage checking → one skill with both tasks
+  - PR review + design principles → evaluate if truly different scope
+  - Self-review + validation → check if checklists belong together
+
+  THE TEST: If a user's query could reasonably trigger EITHER skill,
+  they must be merged. Two skills should only coexist when their trigger
+  keywords are clearly disjoint.
+
+Prompt:
+
+  Re-read "Repo Map" + "Existing Knowledge Assets" from
+  `{DOCS_ROOT}/Discovery_Manifest.md`.
+
+  Deep skill audit (READ ONLY — don't create anything):
+
+  1. Find every SKILL.md in the repo (also *.skill.md, *_skill.md).
+     Also check .github/skills/ for skill folders.
+  2. For each: extract name, description, purpose, trigger keywords,
+     knowledge sources, key rules.
+  3. Build OVERLAP MATRIX against targets (#coding, #add-test-cases,
+     #self-review, #design-principles). Use PURPOSE-BASED matching:
+     - SAME PURPOSE (≥50% overlap) → MERGE (improve existing in-place)
+     - RELATED (partial overlap) → KEEP BOTH + cross-reference
+     - DIFFERENT (no overlap) → CREATE NEW independently
+  4. For MERGE actions: list EXACTLY what sections/content to add to
+     the existing skill.
+  5. Check for skills whose description keywords overlap — two skills
+     matching the same user query cause unpredictable routing.
+
+  IMPORTANT: If an existing skill already covers a BROADER concern that
+  includes the target skill's purpose (e.g., doc-management already
+  covers doc Q&A, or coding-standards already covers linting), the
+  target content belongs as a SECTION inside the existing skill — not
+  as a new standalone skill.
+
+  OUTPUT — OVERLAP MATRIX:
+  | Existing Skill (path) | Purpose | Closest Target | Same Purpose? | Action |
+
+  OUTPUT — KEYWORD COLLISION CHECK:
+  | Keyword/Trigger | Skill A | Skill B | Resolution |
+
+  Proceed to Phase 3B.
+
+
+═══════════════════════════════════════════════════════════════
+PHASE 3B: Copilot Skills — Create or Improve
+═══════════════════════════════════════════════════════════════
+
+Prompt:
+
+  Re-read "Repo Map" from `{DOCS_ROOT}/Discovery_Manifest.md`.
+
+  Execute the action plan from Phase 3A.
+
+  🛑 MERGE-FIRST RULE: For every MERGE action in the overlap matrix,
+  update the EXISTING skill in-place. Do NOT create a new skill folder.
+  Add new sections, update Knowledge Sources, expand trigger keywords
+  in the YAML description. Don't remove valid content.
+
+  MERGE CHECKLIST (per skill being merged into):
+  - [ ] Added missing sections/content from target into existing skill
+  - [ ] Updated YAML `description` with new trigger keywords
+        (deduplicate — don't repeat keywords already present)
+  - [ ] Updated Knowledge Sources table with new doc paths
+        (deduplicate — don't add paths already listed)
+  - [ ] Verified no duplicate skill folder was created
+  - [ ] Updated .github/copilot-instructions.md skill table (one row,
+        not two) — link points to EXISTING skill's actual path, NOT
+        to {SKILLS_ROOT}/
+  - [ ] Verified trigger keywords between merged skill and other skills
+        are disjoint (no routing collisions)
+
+  CREATE NEW in `{SKILLS_ROOT}/` ONLY for skills with no existing match
+  (folder + SKILL.md with YAML frontmatter):
+  1. `coding/SKILL.md` — #coding: enforce standards, code templates per layer
+  2. `add-test-cases/SKILL.md` — #add-test-cases: tests with correct base
+     class, category, naming, 85%+ coverage
+  3. `code-review/SKILL.md` — #self-review + #code-review: validation checklist + multi-persona review
+  4. `design-principles/SKILL.md` — #design-principles: PR review checklist
+  5. `concise/SKILL.md` — #concise: enforce minimal-token response style
+     (no narration, tables > prose, 1-line summaries, skip preamble)
+
+  NOTE: The list above is a STARTING POINT, not a mandate. If an
+  existing skill already covers any of these concerns (even partially),
+  MERGE into it — do NOT create the listed skill. When merging, add
+  the missing capability as a new section in the existing skill and
+  update its YAML description to include the new trigger keywords.
+
+  Cross-reference {DOCS_ROOT} docs. Update .github/copilot-instructions.md
+  with skill list and # triggers.
+
+  OUTPUT: List skills created, merged, cross-referenced.
+
+
+>> FOLLOW-UP — Cross-Reference Pass:
+
+  Update all SKILL.md Knowledge Sources to reference every doc created.
+  DEDUP: Don't add paths already present in an existing skill's sources.
+  PATH CHECK: Skills may live under {SKILLS_ROOT}/ (new) or at their
+  original repo location (pre-existing). Use each skill's actual path
+  when computing relative references to docs.
+  Update README indexes. Verify no SKILL.md references a missing file.
+
+  OUTPUT: List Knowledge Source paths updated per skill.
+  Proceed to Phase 4.
+
+
+═══════════════════════════════════════════════════════════════
+PHASE 4: Doc-to-Code Validation
+═══════════════════════════════════════════════════════════════
+
+Phases 1–3 built docs FROM code. Phase 4 goes the OTHER direction
+(docs → code) to catch drift and hallucinations.
+
+Phase 4 Dependency DAG:
+
+  Phase 3 (complete)
+    │
+    ├── 4A (ref docs)  ─┐
+    ├── 4B (workflows)  ─┼── can run in PARALLEL (independent per doc)
+    ├── 4C (skills)     ─┘
+    │
+    ├── 4D (summary)   ←── depends on 4A + 4B + 4C results
+    │
+    └── 4E (🐵 monkey) ←── can run in PARALLEL with 4A–4C
+                            (reads code + docs independently)
+                            Must complete before Phase 5 commit.
+
+  Recommended order: Start 4E in a separate chat while running 4A–4C
+  in the main chat. Merge results into 4D summary.
+
+
+── 4A: Validate Reference Docs ──────────────────────────────
+
+Run ONCE PER doc: Architecture_Memory, Telemetry_And_Logging_Reference,
+ErrorCode_Reference, Glossary, Code_Exemplars.
+
+Prompt:
+
+  Re-read "Repo Map" from `{DOCS_ROOT}/Discovery_Manifest.md`.
+
+  VALIDATE: «one doc path, e.g., {DOCS_ROOT}/Architecture_Memory.md»
+
+  1. EXTRACT every verifiable claim (file paths, class names, method names,
+     config keys, constants, relationships).
+  2. VERIFY each by reading the actual source file.
+  3. CATEGORIZE: CORRECT | INCOMPLETE | WRONG | MISSING
+  4. FIX every non-CORRECT finding in the doc.
+
+  OUTPUT — CLAIM VALIDATION TABLE:
+  | Claim | Type | Source File | Result | Action Taken |
+  Summary: X checked, Y correct, Z fixed, W added.
+
+
+── 4B: Validate Workflow Docs ───────────────────────────────
+
+Run ONCE PER workflow doc.
+
+Prompt:
+
+  Re-read "Repo Map" from `{DOCS_ROOT}/Discovery_Manifest.md`.
+
+  VALIDATE: «one workflow doc path»
+
+  1. Extract the documented flow (step 1 → 2 → 3...).
+  2. Trace actual code: follow from controller through all layers.
+  3. Verify each step: method exists? Does what doc says? Correct next
+     call? Missing branches/errors/telemetry?
+  4. Verify tables: API routes, config keys, error codes, file paths.
+  5. FIX in-place.
+
+  OUTPUT — WORKFLOW VALIDATION TABLE:
+  | Section | Claims | Correct | Fixed | Added |
+
+
+── 4C: Validate Skills ─────────────────────────────────────
+
+Prompt (all skills, one pass):
+
+  Re-read "Repo Map" from `{DOCS_ROOT}/Discovery_Manifest.md`.
+
+  VALIDATE all SKILL.md files:
+  1. Every Knowledge Sources path exists and is non-empty.
+  2. Code templates match current code (base classes, attributes, naming).
+  3. No contradictions with .github/copilot-instructions.md.
+  4. No stale references.
+  5. No duplicate skills covering the same purpose (re-check overlap
+     matrix from Phase 3A — if duplicates crept in, merge them now).
+  6. Every skill in .github/copilot-instructions.md skill table has a
+     matching SKILL.md file, and vice versa.
+  7. MERGE INTEGRITY: For skills that were merged into (from Phase 3B),
+     verify the merged content is present AND the original content is
+     preserved. Check that:
+     - YAML description includes trigger keywords from BOTH original
+       and merged skill
+     - Knowledge Sources table includes paths from BOTH
+     - Skill table link in copilot-instructions.md points to the
+       actual file path (not a stale or wrong path)
+  Fix in-place.
+
+  OUTPUT — SKILL VALIDATION TABLE:
+  | Skill | Sources OK? | Templates OK? | Contradictions? | Duplicates? | Fixes |
+
+
+── 4E: Curiosity Monkey (Autonomous Documentation Stress Test) ──
+
+Recommended. Runs a fully autonomous code→docs→judge→fix loop to find
+gaps that structured validation misses. NO human in the loop after setup.
+
+Also available as standalone: `docs/demos/Curiosity_Monkey_Prompt.md`
+
+How it works:
+
+  The 🐵 Curiosity Monkey has THREE passes:
+
+  Pass 0 — DISCOVERY: Scans all controller source files, diffs against
+  existing workflow docs, and creates new docs for undocumented
+  controllers. This ensures no controller is invisible to the audit.
+
+  Pass 1 — BREADTH: Reads SOURCE CODE first, forms questions about
+  interesting behavior (edge cases, config, error handling, hidden
+  logic), then searches DOCS to answer its own questions. Covers
+  ALL domains with 2-3 questions each.
+
+  Pass 2 — DEPTH: Drills into weak domains from Pass 1. Stays in
+  one domain until it's solid. Gaps cluster — follows up on each
+  gap with deeper related questions.
+
+  It judges coverage (✅ / ⚠️ / ❌) and auto-fixes gaps via doc
+  self-healing rules in copilot-instructions.md.
+
+  The monkey is both questioner and answerer — same Copilot instance,
+  with phase-ordering guardrails to prevent reading docs before forming
+  questions. No agent-to-agent chaining needed.
+
+To run:
+
+  1. Open a NEW Copilot Chat session (Agent Mode).
+  2. Copy the prompt below (between the ═══ lines).
+  3. Answer the 7 setup questions:
+     - Questions per domain (recommend: 5)
+     - Focus area (blank = all, or "DPP", "RSV")
+     - Difficulty (recommend: deep)
+     - Max consecutive ✅ before skip (recommend: 3)
+     - Auto-fix: yes (edit docs) or dry-run (report only)
+     - Discovery mode: full (find new controllers) or audit-only
+     - Type "go" to start
+  4. Sit back — the monkey runs autonomously until the scorecard.
+
+═══ CURIOSITY MONKEY PROMPT — COPY FROM HERE ═══════════════
+
+You are the 🐵 CURIOSITY MONKEY — a fully autonomous, CODE-FIRST
+documentation gap finder. NO HUMAN IN THE LOOP after setup.
+
+YOUR JOB:
+  1. Read SOURCE CODE to discover interesting behavior
+  2. Form a question about what you found
+  3. Answer your OWN question by searching the docs
+  4. Judge if docs cover the topic
+  5. If not — fix the docs immediately (self-healing auto-triggers)
+  6. Move to the next question
+
+You are BOTH the questioner AND the answerer. You never wait for a
+human response. You run the full loop autonomously.
+
+BEFORE YOU START, ask me these questions ONE AT A TIME:
+
+  1. How many total questions? (number, default: 100)
+  2. Focus area? (blank = all domains, or specify like "DPP", "RSV")
+  3. Difficulty? (basic / intermediate / deep — default: deep)
+  4. Max consecutive ✅ before skipping to next domain? (default: 3)
+  5. Auto-fix gaps? (yes = edit docs, dry-run = report only — default: yes)
+  6. Discovery mode? (full = find & create new docs, audit-only = existing only — default: full)
+  7. Type "go" to start the autonomous run.
+
+After I answer all 7, do this SETUP (silently):
+  - Read .github/copilot-instructions.md to internalize doc self-healing
+    rules, DOCS_ROOT, SKILLS_ROOT, and doc structure conventions
+  - Explore src/ directory structure to identify domains and components
+  - For each domain, read key source files: controllers, handlers,
+    invokers, config classes, error handling, telemetry patterns
+  - Build a question pool from WHAT YOU SEE IN CODE — not from docs
+  - Group questions by domain/component
+  - DO NOT read any docs yet — docs are only read during the ANSWER phase
+  - IMPORTANT: You start from SOURCE CODE. Every question you ask MUST
+    originate from something you read in actual code. The monkey is a
+    REVERSE VALIDATION tool — it checks whether docs accurately reflect
+    what the code actually does, not the other way around.
+
+Then RUN the autonomous loop — no more human interaction needed:
+
+═══ PASS 0: DISCOVERY (find undocumented controllers) ═══
+  Skip this pass if discovery mode = audit-only.
+
+  1. Using the entry point patterns from the Domain Discovery Algorithm
+     (Phase 0, step 3B), scan ALL entry point files in the repo.
+     For ASP.NET: *Controller.cs. For other frameworks, use the
+     matching pattern from the framework table.
+  2. For each entry point, extract class name and public action methods.
+  3. Run the Domain Discovery Algorithm (Phase 0, step 3B) to group
+     entry points into domains: trace downstream, group by shared impl,
+     split by action divergence, name domains.
+  4. Diff discovered domains against existing workflow docs in
+     DOCS_ROOT — which domains have NO doc?
+  5. Group undocumented domains: add-to-existing vs create-new.
+  5. If auto-fix = yes: create new workflow docs using the 14-section
+     template. Read controller + BL source code (2+ levels deep).
+     Verify ALL config properties, error codes, and class names against
+     actual source before writing.
+  6. Update workflow README.md indexes and doc_registry.md
+     (add newly documented controllers, update coverage counts,
+     mark newly-created docs in the registry).
+  7. Print DISCOVERY SCORECARD: controllers found, documented,
+     undocumented, new docs created, sections added to existing docs.
+
+  8. DOMAIN INTEGRITY CHECK (optional — run if domains feel inconsistent):
+     Re-run the Domain Discovery Algorithm (Phase 0, step 3B) on
+     current controllers and compare against existing doc roster:
+     - Controllers whose downstream impl changed → domain boundary
+       may have shifted. Flag for review.
+     - New controllers not in any domain → assign using the algorithm.
+     - Domains with only 1 trivial controller (≤2 actions, no BL) →
+       merge candidate into a related domain.
+     - Controllers split across 2+ docs but sharing the same impl →
+       consolidation candidate.
+     Print DOMAIN INTEGRITY TABLE:
+       | Controller | Current Domain | Algorithm Domain | Match? | Action |
+
+DOMAIN DISCOVERY (builds roster for Pass 1+2):
+  - List ALL workflow docs in DOCS_ROOT/workflows/
+    (INCLUDING any just created in Pass 0) plus shared docs
+    (Architecture_Memory, ErrorCode_Reference, Telemetry_Reference,
+    Glossary, Code_Exemplars)
+  - Build a DOMAIN ROSTER: one entry per workflow doc = one domain
+  - Print the roster as a numbered table
+
+THREE-PASS LOOP — DISCOVER, then BREADTH, then DEPTH:
+
+  ══= PASS 1: BREADTH SCAN (cover ALL domains) ═══
+  - Process EVERY domain in the roster (including Pass 0 new docs),
+    asking 2-3 questions each.
+  - Goal: surface-level gap detection across the entire codebase.
+  - For each domain: read key source files, ask 2-3 deep questions
+    (one FLOW, one CONFIG/ERROR, one EDGE CASE/TELEMETRY).
+  - Judge and fix as normal. Record scores per domain.
+  - After scanning all domains, print a BREADTH SCORECARD:
+    rank domains by gap density (❌ + ⚠️ count, highest first).
+  - This pass uses ~30% of the total question budget.
+
+  ══= PASS 2: DEPTH DRILL (fix weak domains) ═══
+  - Take the remaining ~70% of questions and allocate them to
+    domains ranked by gap density (worst-scoring first).
+  - Skip domains that scored 100% ✅ in Pass 1 (already solid).
+  - For each weak domain: drill deep with follow-up questions.
+    Stay in the domain until consecutive ✅ proves it's solid
+    OR you've exhausted the allocated questions.
+  - When a gap is found: FIX IT, then ask a FOLLOW-UP that probes
+    DEEPER into the same area. Gaps cluster — if one config
+    property is undocumented, check its neighbors.
+  - Print a mini-scorecard when leaving each domain.
+
+  FOR EACH DOMAIN (in both passes):
+    - Print: "🐵 === [PASS X] Entering domain: [name] ([doc file]) ==="
+    - Read source files for this domain (50+ lines per file, method
+      bodies, not just signatures). Build internal question pool.
+    - Track: questions asked, ✅, ⚠️, ❌, consecutive ✅
+
+    FOR EACH QUESTION (up to N for this domain):
+      - Print: "🐵 Q X/N · [domain] · [type]"
+
+    PHASE 1 — ASK (from code):
+      1. Pick a question from your pool. After a ⚠️ or ❌, prefer
+         a FOLLOW-UP that digs deeper into the same area/file.
+      2. State ONE question based on something specific you saw in code.
+         Cite the file/class. Question types to mix:
+         - FLOW: "In [File.cs], method X calls Y then Z. What is this
+           flow doing and when does it trigger?"
+         - CONFIG: "I see [ConfigName] being read in [File.cs]. What
+           controls this and what are valid values?"
+         - ERROR: "In [File.cs], there's a catch block that throws
+           [ErrorCode]. What scenario triggers this?"
+         - TELEMETRY: "I see telemetry/logging [OpName] in [File.cs].
+           What metrics does this track?"
+         - INTEGRATION: "Class [A] calls into [B] via [Interface].
+           How do these components interact?"
+         - EDGE CASE: "In [File.cs], there's a null check / retry /
+           fallback at line ~N. What happens if this path executes?"
+         - HIDDEN LOGIC: "Method [X] has a conditional branch for [Y].
+           This isn't obvious — what business rule drives this?"
+         - ADR: "In [File.cs], the code uses pattern [X] instead of [Y].
+           Is there an ADR explaining why this design was chosen?"
+         - MERMAID: "The workflow doc for [domain] describes a multi-step
+           flow. Does it include a Mermaid sequence diagram with the
+           actual method names and decision points?"
+
+    PHASE 2 — ANSWER (from docs):
+      3. NOW search the docs for the answer. Read the relevant workflow
+         docs, architecture docs, glossary, error code reference.
+      4. Print your answer based on what docs say (or "docs silent").
+
+    PHASE 3 — JUDGE:
+      5. Compare what you know from CODE vs what DOCS say.
+         - ✅ COVERED — docs fully explain the code behavior
+         - ⚠️ PARTIAL — docs mention it but miss details from code
+         - ❌ GAP — docs don't cover this at all
+      6. Print the verdict with a one-line explanation.
+
+    PHASE 4 — FIX (if ⚠️ or ❌ and auto-fix = yes):
+      7. Trigger doc self-healing per copilot-instructions.md rules:
+         - Identify which doc should cover this (or create new one)
+         - Add the missing content with code references
+         - Update indexes (README.md, SKILL.md) if new doc created
+         - Print: "📝 Fixed: added [what] to [which doc]"
+      8. If auto-fix = dry-run, print: "🏷️ Would fix: [what] in [doc]"
+
+    PHASE 5 — DOMAIN LOGIC:
+      9. If ✅: increment consecutive ✅ count for this domain.
+         - PASS 1: After 2-3 questions, move to next domain regardless.
+         - PASS 2: If consecutive ✅ reaches max threshold,
+           print: "🐵 Domain [name] solid! Moving on."
+           Print mini-scorecard. Move to next weak domain.
+      10. If ⚠️ or ❌: reset consecutive ✅ to 0.
+          - PASS 1: Note the gap, fix it, but still move on after 2-3 Qs.
+          - PASS 2: STAY IN THIS DOMAIN. Gaps cluster — keep digging.
+            Next question should probe deeper into the same area.
+      11. After allocated questions for this domain exhausted,
+          print mini-scorecard and move to next domain.
+      12. After Pass 1: print BREADTH SCORECARD ranking all domains.
+      13. After Pass 2: print FINAL SCORECARD with combined results.
+
+AFTER EACH DOMAIN, print a mini-scorecard:
+
+  🐵 [PASS X] Domain [name] complete: X questions, Y✅ Z⚠️ W❌
+  Gaps fixed: [list 1-liners]
+  ─────────────────────────────
+
+AFTER PASS 1, print a BREADTH SCORECARD:
+
+  🐵 BREADTH SCAN COMPLETE
+  ════════════════════════════════
+  | Domain | Qs | ✅ | ⚠️ | ❌ | Gap Density | Pass 2? |
+  Domains ranked worst-first. Domains with 0 gaps → Skip in Pass 2.
+  Pass 2 budget: [remaining questions] across [N weak domains].
+  ─────────────────────────────
+
+AFTER PASS 2, print the final scorecard:
+
+  🐵 CURIOSITY MONKEY SCORECARD
+  ════════════════════════════════
+  Total questions asked: N
+  ✅ Covered:  X (Y%)
+  ⚠️ Partial:  X (Y%)
+  ❌ Gaps:     X (Y%)
+
+  DOMAINS EXPLORED (must show ALL domains):
+  | Domain | Doc | Questions | ✅ | ⚠️ | ❌ | Completed? |
+
+  GAPS FIXED:
+  | # | Question | Domain | Doc Updated | What Was Added |
+
+  COVERAGE ASSESSMENT:
+  - If ✅ ≥ 90%: "Docs are solid. Minor gaps fixed."
+  - If ✅ 70–89%: "Docs need work. Run another round on ❌ domains."
+  - If ✅ < 70%: "Significant gaps. Consider re-running Phase 2 and 4."
+
+AFTER THE FINAL SCORECARD, update doc_registry.md:
+  1. Update the "Last audit" date and add a summary line for this run
+     (e.g., "Curiosity Monkey — N questions, deep, all domains").
+  2. For each doc that was updated/created during the run:
+     - Update "Last Verified" date in the Documented Controllers table
+     - Update "Sections (of 14)" count if new sections were added
+  3. Move any controllers that got new docs from ❌ Undocumented to
+     ✅ Documented (with strikethrough in undocumented table).
+  4. Recompute the Coverage Summary table with current counts.
+  5. Add a "Priority actions" section with top remaining gaps.
+
+RULES:
+  - CODE FIRST, ALWAYS: The monkey is a REVERSE VALIDATION tool. You read
+    SOURCE CODE to discover behavior, then check if docs cover it. You
+    NEVER start from docs and check if code matches. Every question MUST
+    originate from something you observed in actual source code.
+  - DISCOVER FIRST: If discovery mode = full, Pass 0 runs before any
+    audit. Find ALL undocumented controllers, create docs for them.
+  - BREADTH SECOND: Pass 1 MUST touch EVERY domain (including new
+    docs from Pass 0). No domain left unvisited.
+  - THEN GO DEEP: Pass 2 drills into weak domains from Pass 1.
+    Stay in one domain until it's solid. Don't scatter.
+  - FOLLOW THE GAPS: After finding a gap (especially in Pass 2),
+    explore the SAME area deeper — related configs, error paths,
+    callers, telemetry, edge cases in the same file/method.
+  - BUDGET SPLIT: ~30% of total questions for Pass 1 (breadth),
+    ~70% for Pass 2 (depth). E.g., 20 Qs total = 6 breadth + 14 depth.
+  - NEVER read docs before forming a question. Code first, docs second.
+  - You are BOTH questioner and answerer. Never wait for human input.
+  - Run the full ASK → ANSWER → JUDGE → FIX loop for each question
+    before forming the next.
+  - Mix question types within each domain (FLOW, CONFIG, ERROR,
+    TELEMETRY, EDGE CASE, etc.) but bias toward types that found gaps.
+  - Prefer non-obvious behavior: branching logic, fallbacks, retry
+    mechanisms, cross-component calls, hidden config dependencies.
+  - Deep difficulty = multi-hop questions spanning multiple files.
+    Follow calls 2-3 levels deep (controller → BL → VaultImpl → plugin).
+  - When fixing gaps, follow doc self-healing rules in
+    copilot-instructions.md (update existing docs first, don't create
+    duplicates, update indexes).
+  - Always cite the source file/method that prompted the question.
+  - Print progress continuously — the user is watching, not participating.
+
+ANTI-SHORTCUT GUARDRAILS (mandatory — never skip these):
+
+  CODE READING DEPTH:
+  - You MUST read at least 50 lines of actual source code per question.
+    Reading file names, class signatures, or using statements is NOT enough.
+  - Read METHOD BODIES — the interesting behavior is inside conditionals,
+    catch blocks, null checks, and config lookups.
+  - For deep difficulty: follow at least 2 call hops (A calls B calls C).
+  - PROVE you read the code: cite specific line ranges, variable names,
+    or conditional expressions in your question.
+
+  QUESTION QUALITY:
+  - NEVER ask surface-level questions like "What does this class do?"
+    or "What is the purpose of this controller?"
+  - Every question MUST reference a SPECIFIC code construct: a conditional
+    branch, a catch block, a config read, a null check, a retry loop,
+    a cross-component call, or a non-obvious constant.
+  - If your question could be answered by reading the class name alone,
+    it's too shallow. Dig deeper.
+
+  DOC SEARCH DEPTH:
+  - You MUST search at least 3 different doc files before declaring
+    "docs silent". Search: relevant workflow doc, architecture memory,
+    error code reference, glossary, and telemetry reference.
+  - Use grep/search with multiple keyword variants — don't just check
+    one term. Try the method name, the class name, the config key,
+    AND the error code.
+  - PROVE you searched: list which docs you checked and what you searched for.
+
+  JUDGING RIGOR:
+  - ✅ COVERED means docs explain the EXACT behavior you found in code,
+    not just that they mention the feature in passing.
+  - If docs say "handles locking" but don't explain the ActiveActive
+    dynamic path resolution you found, that's ⚠️ PARTIAL, not ✅.
+  - When in doubt between ✅ and ⚠️, choose ⚠️. When in doubt between
+    ⚠️ and ❌, choose ❌. ERR ON THE SIDE OF FINDING GAPS.
+
+  FIX QUALITY:
+  - Every fix MUST include: what the code does, when it triggers,
+    source file path, and at least one relevant detail (config key,
+    error code, or edge case behavior).
+  - One-sentence fixes are NOT acceptable. Minimum: a paragraph or a
+    table with 3+ rows of detail.
+  - Include a code reference (file + method name) in every fix.
+
+  NO BATCHING:
+  - ONE question at a time. Complete the full ASK→ANSWER→JUDGE→FIX
+    loop before forming the next question.
+  - NEVER combine multiple questions into one.
+  - NEVER skip the ANSWER phase by saying "I already know from code."
+
+═══ END OF CURIOSITY MONKEY PROMPT ═════════════════════════
+
+Tips:
+  - Three-pass model: Pass 0 discovers undocumented controllers (creates
+    new docs), Pass 1 breadth scans ALL domains, Pass 2 depth drills.
+  - Discovery mode: Use "full" on first run or after major code changes.
+    Use "audit-only" for routine sweeps on existing docs.
+  - Budget: Pass 0 doesn't consume the question budget. For N audit Qs
+    (default 100), ~30% breadth + ~70% depth.
+    E.g., 100 Qs = ~30 breadth (2-3 per domain) + ~70 depth (worst domains first).
+  - Gap hunting: consecutive-skip=5, difficulty=deep to dig harder.
+  - Targeted: Focus on a domain you just changed (skips Pass 0+1).
+  - Pre-PR: audit-only, 3–5 deep questions on the changed domain.
+  - Dry-run first: See what gaps exist before committing fixes.
+  - Config verification: The monkey verifies config references against
+    source code — fabricated config names were 40% of bugs in prior runs.
+
+Exit criteria:
+  - Pass 0: All controllers have a workflow doc (or section in one).
+  - ✅ ≥ 90% → Docs are solid. Proceed to 4D.
+  - ✅ 70–89% → Re-run on ❌ domains with more questions.
+  - ✅ < 70% → Significant gaps. Consider re-running Phase 2 first.
+
+When to run:
+  - After Phase 4A–4C (initial build validation gate)
+  - Pre-PR (targeted: focus on changed domain, 3–5 deep questions)
+  - Periodic sweeps (catch drift as code evolves)
+  - Post-feature (run on the domain you just changed)
+
+
+── 4D: Validation Summary ──────────────────────────────────
+
+Prompt:
+
+  Generate `{DOCS_ROOT}/Validation_Report.md`:
+
+  ## Validation Report — «date»
+  ### Overall Health
+  Total verified: N | Correct: N (%) | Fixed: N | Added: N
+  ### Per-Document Summary
+  | Document | Claims | Correct | Fixed | Added | Confidence |
+  ### Common Issues Found
+  ### Recommendations
+
+  Update Discovery Manifest with "Last Validated: «date»".
+  OUTPUT: Create file. One-line health summary. Proceed to Phase 5.
+
+
+═══════════════════════════════════════════════════════════════
+PHASE 5: Maintenance & Re-validation
+═══════════════════════════════════════════════════════════════
+
+── Quick Re-validation (anytime, ~5 min) ────────────────────
+
+Prompt:
+
+  Re-read "Repo Map" from `{DOCS_ROOT}/Discovery_Manifest.md`.
+
+  Quick-check:
+  1. Git log for last «N» days/commits.
+  2. For changed files, verify any doc references are still accurate.
+  3. Flag new controllers/services/tests not in any workflow doc.
+  4. Fix stale refs. Update Discovery Manifest timestamp if fixed.
+  5. Update doc_registry.md: re-scan controllers, update coverage
+     counts, mark stale docs (last-verified > 30 days), flag any
+     new undocumented controllers found since last audit.
+  6. ADR check: for any changed file that implements a design decision
+     documented in an ADR, verify the ADR still reflects current code.
+     If a decision was reversed or superseded, update the ADR status
+     to "Superseded by ADR-NNNN" and create the new ADR.
+  7. Mermaid check: for any workflow doc referencing changed files,
+     verify Mermaid diagrams still match the actual method call chain.
+
+  OUTPUT — MAINTENANCE TABLE:
+  | Changed File | Referenced By | Still Accurate? | Fix Applied |
+  New files needing docs: <list or "none">
+
+
+── PR Re-validation ─────────────────────────────────────────
+
+Prompt:
+
+  Files changed: «list or "check git diff"»
+
+  Per changed file: find referencing docs, verify accuracy, update for
+  renames/additions/removals, add new workflows/errors. Update timestamp.
+
+  ADR & Mermaid checks:
+  - If changed code implements a decision in an existing ADR, verify ADR
+    is still accurate. Update or supersede if the decision changed.
+  - If a workflow doc's Mermaid diagram references changed methods,
+    verify the diagram still matches. Update method names, add/remove
+    participants, fix decision branches.
+  - If a new architectural decision was made (new pattern, new config
+    flag, new error handling strategy), create a new ADR.
+
+  OUTPUT — PR VALIDATION TABLE:
+  | Changed File | Docs Affected | Updates Made |
+  Proceed to Phase 6.
+
+
+═══════════════════════════════════════════════════════════════
+PHASE 6: Git Tracking Verification
+═══════════════════════════════════════════════════════════════
+
+Run LAST after all phases complete.
+
+Prompt:
+
+  Verify Git tracks every playbook file. .gitignore may silently exclude them.
+
+  1. List all files created: .github/copilot-instructions.md,
+     .github/copilot-memory.md, everything under {DOCS_ROOT}/ and {SKILLS_ROOT}/.
+
+  2. If .gitignore exists, run `git check-ignore -v <filepath>` per file.
+
+  3. For ignored files, add NEGATION rules (don't remove existing rules):
+     - `docs/` ignored → add `!{DOCS_ROOT}/` and `!{SKILLS_ROOT}/`
+     - `*.md` ignored → add `!.github/*.md`, `!{DOCS_ROOT}/**/*.md`,
+       `!{SKILLS_ROOT}/**/*.md`
+
+  4. Re-run check-ignore to confirm. Stage all files + .gitignore.
+
+  OUTPUT — GIT TRACKING TABLE:
+  | File | Tracked? | Ignored By (rule) | Fix Applied |
+  Summary: total N, tracked N, fixed N, .gitignore modified: <list or none>.
+  Proceed to Phase 7.
+
+
+═══════════════════════════════════════════════════════════════
+PHASE 7: Commit, Push & Pull Request
+═══════════════════════════════════════════════════════════════
+
+Run LAST after Phase 6 confirms all files are tracked.
+
+Prompt:
+
+  All knowledge layer files are staged. Now let's commit and optionally
+  push.
+
+  1. Show a summary of staged files:
+     - Run `git status --short` and present the list.
+     - Count: N files added, N modified.
+
+  2. Commit with message:
+     `git commit -m "Add AI-native knowledge layer (copilot-instructions,
+     workflow docs, skills, exemplars)"`
+     Or suggest a better message based on what was actually created.
+
+  3. SMOKE TEST — verify the knowledge layer works before pushing:
+     Run a quick 5-question Curiosity Monkey (mini-run) to confirm:
+     - copilot-instructions.md is parseable and has all required sections
+     - At least 3 workflow docs are readable and have ≥5 sections each
+     - doc_registry.md exists and has valid coverage numbers
+     - At least 1 skill SKILL.md has valid YAML frontmatter
+     - A code-first question can be asked and answered from docs
+
+     Print SMOKE TEST RESULTS:
+     | Check | Status | Detail |
+     |-------|--------|--------|
+     | copilot-instructions.md | ✅/❌ | sections found / issue |
+     | Workflow docs (sample 3) | ✅/❌ | avg sections / issue |
+     | doc_registry.md | ✅/❌ | coverage % / missing |
+     | Skills YAML | ✅/❌ | valid / parse error |
+     | Code-first Q&A | ✅/❌ | answered / gap |
+
+     If any check is ❌: fix the issue before proceeding to push.
+     If all ✅: proceed to step 4.
+
+  4. Ask: Do you want to push and create a PR?
+     (a) YES — push to remote and create a PR (recommended)
+     (b) NO — keep changes local only
+
+     ⚠️ If NO: changes remain in local commits only. They will NOT be
+     visible to other team members or Copilot cloud agents until pushed.
+     You can push later with: `git push -u origin HEAD`
+
+  If YES:
+  5. Push the branch:
+     `git push -u origin HEAD`
+
+  6. Generate a PR description summarizing what was added:
+     - Title: "Add AI-native knowledge layer for Copilot and developer onboarding"
+     - Body: list of docs created, skills created/merged, key decisions
+     - Include a "What's in this PR" section with file categories:
+       Infrastructure (.github/), Reference Docs, Workflow Docs,
+       Doc Registry, Skills, Validation Reports
+     - Include smoke test results summary
+
+  7. Create the PR (adapt per platform):
+     - GitHub: `gh pr create --title "..." --body "..."`
+     - Azure DevOps: `az repos pr create --title "..." --description "..."`
+     - Or: print the PR URL and description for manual creation
+
+  OUTPUT:
+  - Smoke test: PASS/FAIL (N/5 checks passed)
+  - Commit SHA
+  - Push result (success/fail) — or "local only" if user chose NO
+  - PR URL (or description for manual creation)
+  Done.
+
+
+═══════════════════════════════════════════════════════════════
+💡 QUICK REFERENCE
+═══════════════════════════════════════════════════════════════
+
+  RULES:
+  • Agent mode required • Phases in order (0→7) • Set paths before starting
+  • Replace «brackets» — delete examples • Don't skip quality loops
+  • Existing files get merged, not overwritten
+
+  WHEN TO COMMIT:
+  After Phase 1 → After Phase 2 (per batch) → After Phase 2B → After Phase 2C → After Phase 3B → After Phase 4D
+  → After Phase 4E (🐵 ≥ 90% ✅) → Phase 5 on-demand → Phase 6+7 final
+
+  NON-GITHUB REPOS:
+  Copilot reads .github/copilot-instructions.md regardless of host.
+  Create .github/ if missing, or adapt path.
+
+
+═══════════════════════════════════════════════════════════════
+📁 WHAT YOU'LL END UP WITH
+═══════════════════════════════════════════════════════════════
+
+  .github/
+    copilot-instructions.md          ← Master rules + self-healing
+    copilot-memory.md                ← Persistent architecture memory
+    skills/                          ← Default SKILLS_ROOT (.github/skills/)
+      coding/SKILL.md                ← #coding (if no existing match)
+      add-test-cases/SKILL.md        ← #add-test-cases (if no existing match)
+      code-review/SKILL.md           ← #self-review + #code-review
+      design-principles/SKILL.md     ← #design-principles (if no existing match)
+  {DOCS_ROOT}/                       ← docs/«KB_NAME» (e.g., docs/knowledge)
+    Discovery_Manifest.md            ← Repo map + anchor (Phase 0)
+    doc_registry.md                  ← Controller inventory + doc health (Phase 2B)
+    Architecture_Memory.md           ← Architecture reference
+    Telemetry_And_Logging_Reference.md
+    ErrorCode_Reference.md
+    Glossary.md
+    Validation_Report.md             ← Phase 4 results
+    exemplars/Code_Exemplars.md      ← Gold-standard patterns
+    adr/                             ← Architecture Decision Records (Phase 2C)
+      README.md                      ← ADR index
+      0001-adr-template.md           ← Template for new ADRs
+      0002-*.md ... NNNN-*.md        ← Individual decision records
+    workflows/
+      README.md + 01_*.md, 02_*.md...  ← With Mermaid sequence diagrams
+
+  NOTE ON MERGED SKILLS: Skills that were merged into pre-existing
+  skills stay at their ORIGINAL paths. They do NOT move to
+  {SKILLS_ROOT}/. The copilot-instructions.md skill table will have
+  a mix of {SKILLS_ROOT}/ paths (new) and original paths (merged).
+  This is correct — don't "normalize" paths.
+
+
+═══════════════════════════════════════════════════════════════
+🔥 TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════
+
+  SYMPTOM → FIX
+  ───────────────────────────────────────────────────────────
+  Hallucinated paths/names    → New chat, re-read anchor, resume phase
+  Quality degrades late       → Context limit hit — smaller batches
+  Forgets Phase 1 conventions → Add "Re-read copilot-instructions.md" to prompt
+  Missed branches/errors      → Run Phase 4B on that specific doc
+  Duplicate skill created     → Delete duplicate, merge content into existing
+                                skill, update copilot-instructions.md to remove
+                                duplicate row. Re-run Phase 3A overlap audit.
+  Docs drift after changes    → Run Phase 5 targeting changed files
+  Phase partially completes   → Re-run with SCOPE = missing items only
+  🐵 scores < 90%             → Re-run on ❌ domains with more questions;
+                                if < 70%, re-run Phase 2 on those domains first
+  🐵 fixes wrong doc          → Revert (git checkout), re-run with focus area
+  🐵 runs out of context      → Split: run per-domain in separate sessions
+
+  ROLLBACK:
+  Bad file:    git checkout -- <filepath>
+  Full phase:  git checkout -- {DOCS_ROOT}/  (or {SKILLS_ROOT}/)
+
+  RESUME AFTER CONTEXT LOSS:
+  "Read .github/copilot-instructions.md and Repo Map + Identified Domains
+  of {DOCS_ROOT}/Discovery_Manifest.md. DOCS_ROOT={DOCS_ROOT},
+  SKILLS_ROOT={SKILLS_ROOT}. Continue Phase N, covering only: «missing items»"
+
+
+═══════════════════════════════════════════════════════════════
+📋 NAMED TABLE FORMATS
+═══════════════════════════════════════════════════════════════
+
+  VERIFICATION TABLE (Phase 1):
+  | Document | Claim Checked | Source File Read | Result (CORRECT/FIXED/ADDED) |
+
+  STANDARDS AUDIT TABLE (Phase 2):
+  | Workflow Doc | Missing Sections | Fixed? |
+
+  REVALIDATION TABLE (Phase 2):
+  | Doc | Claims Checked | Corrections Made | Paths Added |
+
+  OVERLAP MATRIX (Phase 3A):
+  | Existing Skill (path) | Purpose | Closest Target | Same Purpose? | Action |
+
+  CLAIM VALIDATION TABLE (Phase 4A):
+  | Claim | Type | Source File | Result | Action Taken |
+
+  WORKFLOW VALIDATION TABLE (Phase 4B):
+  | Section | Claims | Correct | Fixed | Added |
+
+  SKILL VALIDATION TABLE (Phase 4C):
+  | Skill | Sources OK? | Templates OK? | Contradictions? | Duplicates? | Fixes |
+
+  CURIOSITY MONKEY SCORECARD (Phase 4E):
+  | Domain | Questions | ✅ | ⚠️ | ❌ | Skipped Early? |
+  DISCOVERY TABLE (Phase 4E Pass 0):
+  | Controller | Source Path | Existing Doc? | Action | Result |
+  GAPS FIXED TABLE (Phase 4E):
+  | # | Question | Domain | Doc Updated | What Was Added |
+
+  MAINTENANCE TABLE (Phase 5):
+  | Changed File | Referenced By | Still Accurate? | Fix Applied |
+
+  PR VALIDATION TABLE (Phase 5):
+  | Changed File | Docs Affected | Updates Made |
+
+  ADR SUMMARY TABLE (Phase 2C):
+  | ADR | Title | Decision | Key Trade-off |
+
+  GIT TRACKING TABLE (Phase 6):
+  | File | Tracked? | Ignored By (rule) | Fix Applied |

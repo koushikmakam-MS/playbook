@@ -1,0 +1,15 @@
+# Code owners — required reviewers for PRs
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything
+* @KoushikMakam
+
+# Shared modules — extra scrutiny (breaking changes affect all monkeys)
+/shared/ @KoushikMakam
+
+# Prompts — changes affect output quality across all runs
+/prompts/ @KoushikMakam
+
+# Orchestrator — changes affect all execution flows
+Run-Player.ps1 @KoushikMakam
+Run-PlayerList.ps1 @KoushikMakam
