@@ -70,7 +70,8 @@ param(
     [int]$CallTimeout = 300,
     [switch]$ShowVerbose,
     [switch]$ForcePlaybook,      # Re-run playbook even if knowledge layer exists
-    [string[]]$TargetAgents      # AI agents to score for (copilot, cursor, claude, etc.)
+    [string[]]$TargetAgents,     # AI agents to score for (copilot, cursor, claude, etc.)
+    [int]$BatchSize = 5          # Questions per batch (0 = single mode)
 )
 
 $ErrorActionPreference = "Stop"
@@ -288,6 +289,11 @@ foreach ($monkey in $config.OrderedMonkeys) {
         InternalRepoPath   = $workDir
         InternalModel      = $selectedModel
         InternalOutputPath = $monkeyOutputDir
+    }
+
+    # BatchSize is common to all prompt-mode monkeys
+    if ($BatchSize -and $monkeyId -notin @('playbook', 'curious-george')) {
+        $monkeyParams.BatchSize = $BatchSize
     }
 
     # Add monkey-specific params
