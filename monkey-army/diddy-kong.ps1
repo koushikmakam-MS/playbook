@@ -194,7 +194,10 @@ function Build-DependencyGraph {
             $content = Get-Content $file.FullPath -Raw -ErrorAction Stop
             if (-not $content) { continue }
         }
-        catch { continue }
+        catch {
+            Write-Verbose "Skipping $($file.FullPath): $_"
+            continue
+        }
 
         $imports = @()
         foreach ($pattern in $patterns) {
