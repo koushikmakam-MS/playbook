@@ -302,10 +302,11 @@ Or pick specific monkeys: `-Monkeys rafiki,mojo-jojo,marcel`
 | `-CommitMode` | string | `dry-run` | `commit`, `dry-run`, or `stage` |
 | `-Model` | string | auto | AI model (`claude-sonnet-4`, `gpt-4.1`, etc.) |
 | `-QuestionsPerEntry` | int | 10 | Questions per entry point (Rafiki) |
-| `-BatchSize` | int | 50 | Questions per answer batch (0 = single mode) |
+| `-BatchSize` | int | 5 | Questions per answer batch (0 = single mode) |
 | `-MaxQuestions` | int | 500 | Max questions per monkey |
 | `-NonInteractive` | switch | — | Skip wizard, use defaults |
 | `-ParallelGen` | switch | — | Run question gen for all monkeys in parallel |
+| `-MaxParallelJobs` | int | 3 | Max concurrent gen jobs (used with `-ParallelGen`) |
 | `-Resume` | switch | — | Resume from last checkpoint |
 | `-CleanStart` | switch | — | Purge all checkpoints before running |
 | `-Incremental` | switch | — | Only process changed files |

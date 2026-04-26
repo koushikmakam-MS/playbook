@@ -71,13 +71,14 @@ param(
     [switch]$ShowVerbose,
     [switch]$ForcePlaybook,      # Re-run playbook even if knowledge layer exists
     [string[]]$TargetAgents,     # AI agents to score for (copilot, cursor, claude, etc.)
-    [int]$BatchSize = 50,        # Questions per answer batch (default 50, 0 = single mode)
+    [int]$BatchSize = 5,         # Questions per answer batch (default 5, 0 = single mode)
     [int]$MaxQuestions = 500,     # Cap total questions per monkey (0 = no cap)
     [switch]$Incremental,        # Only process changed files
     [string]$Since,              # Git ref or date for incremental mode
     [switch]$Resume,             # Resume from last checkpoint
     [switch]$CleanStart,         # Purge all checkpoints before running
-    [switch]$ParallelGen         # Run question generation for all monkeys in parallel
+    [switch]$ParallelGen,        # Run question generation for all monkeys in parallel
+    [int]$MaxParallelJobs = 3    # Max concurrent gen jobs when -ParallelGen is set
 )
 
 $ErrorActionPreference = "Stop"
@@ -455,12 +456,24 @@ if ($ParallelGen) {
         Write-Host "  ══════════════════════════════════════════" -ForegroundColor Magenta
         Write-Host "  ⚡ PARALLEL QUESTION GENERATION" -ForegroundColor Magenta
         Write-Host "  ══════════════════════════════════════════" -ForegroundColor Magenta
-        Write-Host "  Launching $($genEligible.Count) monkeys in parallel for question gen..." -ForegroundColor Cyan
+        Write-Host "  Launching $($genEligible.Count) monkeys in parallel (max $MaxParallelJobs concurrent)..." -ForegroundColor Cyan
 
         $genStartTime = Get-Date
         $jobs = @{}
+        $totalJobs = $genEligible.Count
+        $completed = 0
 
         foreach ($monkey in $genEligible) {
+            # Throttle: wait until a slot is free
+            while ($jobs.Count -gt 0 -and ($jobs.Values | Where-Object { $_.Job.State -eq 'Running' }).Count -ge $MaxParallelJobs) {
+                Start-Sleep -Seconds 3
+                $nowComplete = @($jobs.Values | Where-Object { $_.Job.State -ne 'Running' }).Count
+                if ($nowComplete -gt $completed) {
+                    $completed = $nowComplete
+                    $elapsed = ((Get-Date) - $genStartTime).ToString('mm\:ss')
+                    Write-Host "    ⏱️  $completed/$totalJobs gen jobs complete ($elapsed elapsed)" -ForegroundColor DarkGray
+                }
+            }
             $mid = $monkey.Id
             $mScript = Join-Path $PSScriptRoot "monkey-army" $monkeyScripts[$mid]
 
@@ -504,10 +517,8 @@ if ($ParallelGen) {
             $jobs[$mid] = @{ Job = $job; Monkey = $monkey }
         }
 
-        # Wait for all jobs with progress reporting
+        # Wait for remaining jobs with progress reporting
         Write-Host ""
-        $totalJobs = $jobs.Count
-        $completed = 0
 
         while ($jobs.Values | Where-Object { $_.Job.State -eq 'Running' }) {
             Start-Sleep -Seconds 5
