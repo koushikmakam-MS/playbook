@@ -42,6 +42,10 @@ param(
 
     [switch]$ShowVerbose,
 
+    # Parallel gen mode
+    [switch]$GenOnly,
+    [array]$PreGenQuestions = @(),
+
     # Internal mode (called by orchestrator — skips setup/commit)
     [switch]$Internal,
     [string]$InternalRepoPath,
@@ -469,13 +473,30 @@ function Start-Marcel {
         $discoveryReport | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $script:OutputPath "discovery.json") -Encoding UTF8
 
         # Phase 3: Question generation
-        $questions = New-StaleDocQuestions -DocAnalysis $docAnalysis -WorkingDirectory $workDir
+        if ($PreGenQuestions -and $PreGenQuestions.Count -gt 0) {
+            $questions = $PreGenQuestions
+            Write-Step "Using $($PreGenQuestions.Count) pre-generated questions" "OK"
+        } else {
+            $savedQ = Get-QuestionCheckpoint -OutputPath $script:OutputPath
+            if ($savedQ -and $savedQ.Count -gt 0 -and -not $GenOnly) {
+                $questions = $savedQ
+                Write-Step "Loaded $($savedQ.Count) questions from checkpoint — skipping generation" "OK"
+            } else {
+                $questions = New-StaleDocQuestions -DocAnalysis $docAnalysis -WorkingDirectory $workDir
+                Save-QuestionCheckpoint -OutputPath $script:OutputPath -Questions $questions
+            }
+        }
 
         if ($questions.Count -eq 0) {
             Write-Step "No questions generated from stale docs" "WARN"
             $duration = (Get-Date) - $startTime
             return New-MonkeyResult -MonkeyName $script:MONKEY_NAME -Duration $duration `
                 -Model $script:SelectedModel -ExitStatus 'SUCCESS' -QuestionsAsked 0 -QuestionsAnswered 0
+        }
+
+        # GenOnly mode — return questions without answering
+        if ($GenOnly) {
+            return @{ Questions = $questions; Status = 'gen-complete'; MonkeyName = $script:MONKEY_NAME; Count = $questions.Count }
         }
 
         # Phase 4: Execution (shared)

@@ -113,6 +113,10 @@ param(
 
     [switch]$ShowVerbose,
 
+    # Parallel gen mode
+    [switch]$GenOnly,
+    [array]$PreGenQuestions = @(),
+
     # Internal mode (called by orchestrator — skips setup/commit)
     [switch]$Internal,
     [string]$InternalRepoPath,
@@ -650,7 +654,24 @@ function Start-Rafiki {
         }
 
         # Phase 3: Question generation
-        $questions = New-Questions -EntryPoints $entryPoints -WorkingDirectory $workDir
+        if ($PreGenQuestions -and $PreGenQuestions.Count -gt 0) {
+            $questions = $PreGenQuestions
+            Write-Step "Using $($PreGenQuestions.Count) pre-generated questions" "OK"
+        } else {
+            $savedQ = Get-QuestionCheckpoint -OutputPath $script:OutputPath
+            if ($savedQ -and $savedQ.Count -gt 0 -and -not $GenOnly) {
+                $questions = $savedQ
+                Write-Step "Loaded $($savedQ.Count) questions from checkpoint — skipping generation" "OK"
+            } else {
+                $questions = New-Questions -EntryPoints $entryPoints -WorkingDirectory $workDir
+                Save-QuestionCheckpoint -OutputPath $script:OutputPath -Questions $questions
+            }
+        }
+
+        # GenOnly mode — return questions without answering
+        if ($GenOnly) {
+            return @{ Questions = $questions; Status = 'gen-complete'; MonkeyName = $script:MONKEY_NAME; Count = $questions.Count }
+        }
 
         # Phase 4: Execution (shared)
         $docDirs = Get-DocDirectories -RootDir $workDir
