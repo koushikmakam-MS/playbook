@@ -76,6 +76,10 @@ param(
 
     [switch]$ShowVerbose,
 
+    # Parallel gen mode
+    [switch]$GenOnly,
+    [array]$PreGenQuestions = @(),
+
     # Internal mode (called by orchestrator — skips setup/commit)
     [switch]$Internal,
     [string]$InternalRepoPath,
@@ -763,13 +767,30 @@ function Start-KingLouie {
         }
 
         # ── Phase 3: Question Generation ──
-        $questions = New-ContractQuestions -Discovery $discovery -WorkingDirectory $workDir -GapBatchSize $GapBatchSize
+        if ($PreGenQuestions -and $PreGenQuestions.Count -gt 0) {
+            $questions = $PreGenQuestions
+            Write-Step "Using $($PreGenQuestions.Count) pre-generated questions" "OK"
+        } else {
+            $savedQ = Get-QuestionCheckpoint -OutputPath $script:OutputPath
+            if ($savedQ -and $savedQ.Count -gt 0 -and -not $GenOnly) {
+                $questions = $savedQ
+                Write-Step "Loaded $($savedQ.Count) questions from checkpoint — skipping generation" "OK"
+            } else {
+                $questions = New-ContractQuestions -Discovery $discovery -WorkingDirectory $workDir -GapBatchSize $GapBatchSize
+                Save-QuestionCheckpoint -OutputPath $script:OutputPath -Questions $questions
+            }
+        }
 
         if ($questions.Count -eq 0) {
             Write-Step "No questions generated." "WARN"
             $duration = (Get-Date) - $startTime
             return New-MonkeyResult -MonkeyName $script:MONKEY_NAME -Duration $duration `
                 -Model $script:SelectedModel -ExitStatus 'SUCCESS' -QuestionsAsked 0 -QuestionsAnswered 0
+        }
+
+        # GenOnly mode — return questions without answering
+        if ($GenOnly) {
+            return @{ Questions = $questions; Status = 'gen-complete'; MonkeyName = $script:MONKEY_NAME; Count = $questions.Count }
         }
 
         # ── Phase 4: Execution (shared) ──

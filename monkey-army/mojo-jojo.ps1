@@ -75,6 +75,10 @@ param(
     [string[]]$ExcludePattern = @(),
     [int]$MinSeverity = 2,
 
+    # Parallel gen mode
+    [switch]$GenOnly,
+    [array]$PreGenQuestions = @(),
+
     # Internal mode (called by orchestrator — skips setup/commit)
     [switch]$Internal,
     [string]$InternalRepoPath,
@@ -785,33 +789,52 @@ $fileRisks | ConvertTo-Json -Depth 10 | Set-Content $riskScanPath -Encoding UTF8
 Write-Host "  💾 Risk scan saved: $riskScanPath" -ForegroundColor DarkGray
 
 # ── Phase 3: Question Generation ─────────────────────────────────────
-$questions = New-RiskQuestions -FileRisks $fileRisks -WorkDir $workDir -SelectedModel $selectedModel -RiskBatchSize $RiskBatchSize
+if ($PreGenQuestions -and $PreGenQuestions.Count -gt 0) {
+    $monkeyQuestions = $PreGenQuestions
+    Write-Host "  [OK] Using $($PreGenQuestions.Count) pre-generated questions" -ForegroundColor Green
+} else {
+    $savedQ = Get-QuestionCheckpoint -OutputPath $outputPath
+    if ($savedQ -and $savedQ.Count -gt 0 -and -not $GenOnly) {
+        $monkeyQuestions = $savedQ
+        Write-Host "  [OK] Loaded $($savedQ.Count) questions from checkpoint — skipping generation" -ForegroundColor Green
+    } else {
+        $questions = New-RiskQuestions -FileRisks $fileRisks -WorkDir $workDir -SelectedModel $selectedModel -RiskBatchSize $RiskBatchSize
 
-if ($questions.Count -eq 0) {
-    Write-Host "❌ No questions generated. Check risk scan results." -ForegroundColor Red
-    exit 1
-}
+        if ($questions.Count -eq 0) {
+            Write-Host "❌ No questions generated. Check risk scan results." -ForegroundColor Red
+            exit 1
+        }
 
-# Save questions
-$questionsPath = Join-Path $outputPath "questions.json"
-$questions | ConvertTo-Json -Depth 10 | Set-Content $questionsPath -Encoding UTF8
-Write-Host "  💾 Questions saved: $questionsPath" -ForegroundColor DarkGray
+        # Save questions
+        $questionsPath = Join-Path $outputPath "questions.json"
+        $questions | ConvertTo-Json -Depth 10 | Set-Content $questionsPath -Encoding UTF8
+        Write-Host "  💾 Questions saved: $questionsPath" -ForegroundColor DarkGray
 
-# ── Phase 4: Question Execution (shared) ─────────────────────────────
-# Transform questions into the format expected by shared Invoke-MonkeyQuestions
-$monkeyQuestions = @()
-$idx = 0
-foreach ($q in $questions) {
-    $idx++
-    $monkeyQuestions += @{
-        Index        = $idx
-        EntryPoint   = $q.SourceFile
-        Category     = $q.Category
-        Question     = $q.Question
-        Severity     = $q.Severity
-        TargetPattern = $q.TargetPattern
+        # Transform to monkey format
+        $monkeyQuestions = @()
+        $idx = 0
+        foreach ($q in $questions) {
+            $idx++
+            $monkeyQuestions += @{
+                Index        = $idx
+                EntryPoint   = $q.SourceFile
+                Category     = $q.Category
+                Question     = $q.Question
+                Severity     = $q.Severity
+                TargetPattern = $q.TargetPattern
+            }
+        }
+
+        Save-QuestionCheckpoint -OutputPath $outputPath -Questions $monkeyQuestions
     }
 }
+
+# GenOnly mode — return questions without answering
+if ($GenOnly) {
+    return @{ Questions = $monkeyQuestions; Status = 'gen-complete'; MonkeyName = $MONKEY_NAME; Count = $monkeyQuestions.Count }
+}
+
+# ── Phase 4: Question Execution (shared) ─────────────────────────────
 
 $docDirs = Get-DocDirectories -RootDir $workDir
 $results = Invoke-MonkeyQuestions `

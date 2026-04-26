@@ -76,7 +76,8 @@ param(
     [switch]$Incremental,        # Only process changed files
     [string]$Since,              # Git ref or date for incremental mode
     [switch]$Resume,             # Resume from last checkpoint
-    [switch]$CleanStart          # Purge all checkpoints before running
+    [switch]$CleanStart,         # Purge all checkpoints before running
+    [switch]$ParallelGen         # Run question generation for all monkeys in parallel
 )
 
 $ErrorActionPreference = "Stop"
@@ -315,6 +316,10 @@ if ($CleanStart) {
         Remove-Item $_.FullName -Force
         Write-Step "  Removed $($_.FullName)" "INFO"
     }
+    Get-ChildItem -Path $outputRoot -Recurse -Filter "questions-checkpoint.json" -ErrorAction SilentlyContinue | ForEach-Object {
+        Remove-Item $_.FullName -Force
+        Write-Step "  Removed $($_.FullName)" "INFO"
+    }
     Write-Step "All checkpoints purged — starting fresh" "OK"
 }
 
@@ -431,6 +436,137 @@ foreach ($monkey in $config.OrderedMonkeys) {
     }
 }
 Save-RunCheckpoint -OutputRoot $outputRoot -CheckpointData $runCheckpoint
+
+# ── Parallel Question Generation ──────────────────────────────────
+# When -ParallelGen is set, run question gen for all prompt-mode monkeys
+# in parallel using PS7 jobs, then feed pre-generated questions to the
+# sequential answering loop.
+$parallelGenResults = @{}  # monkeyId → questions array
+
+if ($ParallelGen) {
+    # Identify prompt-mode monkeys eligible for parallel gen (exclude agent-mode and already-completed)
+    $genEligible = @($config.OrderedMonkeys | Where-Object {
+        $_.Mode -eq 'prompt' -and
+        -not $skipMonkeys.ContainsKey($_.Id)
+    })
+
+    if ($genEligible.Count -gt 1) {
+        Write-Host ""
+        Write-Host "  ══════════════════════════════════════════" -ForegroundColor Magenta
+        Write-Host "  ⚡ PARALLEL QUESTION GENERATION" -ForegroundColor Magenta
+        Write-Host "  ══════════════════════════════════════════" -ForegroundColor Magenta
+        Write-Host "  Launching $($genEligible.Count) monkeys in parallel for question gen..." -ForegroundColor Cyan
+
+        $genStartTime = Get-Date
+        $jobs = @{}
+
+        foreach ($monkey in $genEligible) {
+            $mid = $monkey.Id
+            $mScript = Join-Path $PSScriptRoot "monkey-army" $monkeyScripts[$mid]
+
+            if (-not (Test-Path $mScript)) { continue }
+
+            # Create per-monkey output dir
+            $mOutDir = Join-Path $outputRoot $mid
+            New-Item -ItemType Directory -Path $mOutDir -Force | Out-Null
+            New-Item -ItemType Directory -Path (Join-Path $mOutDir "session-logs") -Force | Out-Null
+
+            # Build GenOnly params
+            $gParams = @{
+                Internal           = $true
+                InternalRepoPath   = $workDir
+                InternalModel      = $selectedModel
+                InternalOutputPath = $mOutDir
+                GenOnly            = $true
+            }
+
+            # Add monkey-specific params
+            if ($BatchSize -and $mid -notin @('playbook', 'curious-george')) { $gParams.BatchSize = $BatchSize }
+            if ($config.MaxQuestions) { $gParams.MaxQuestions = $config.MaxQuestions }
+            if ($Incremental) { $gParams.Incremental = $true; if ($Since) { $gParams.Since = $Since } }
+
+            switch ($mid) {
+                'rafiki'     { $gParams.QuestionsPerEntry = $config.QuestionsPerEntry; if ($ShowVerbose) { $gParams.ShowVerbose = $true } }
+                'abu'        { $gParams.QuestionsPerGap = $config.QuestionsPerGap; if ($ShowVerbose) { $gParams.ShowVerbose = $true } }
+                'mojo-jojo'  { $gParams.QuestionsPerFile = $config.QuestionsPerFile; if ($ShowVerbose) { $gParams.ShowVerbose = $true } }
+                'diddy-kong' { if ($config.QuestionsPerEntry) { $gParams.QuestionsPerFinding = [Math]::Max(3, [int]($config.QuestionsPerEntry / 3)) }; if ($ShowVerbose) { $gParams.ShowVerbose = $true } }
+                default      { if ($ShowVerbose) { $gParams.ShowVerbose = $true } }
+            }
+
+            Write-Host "    🚀 $($monkey.Emoji) $($monkey.Name) — launching gen job..." -ForegroundColor DarkCyan
+
+            # Launch as PS7 job
+            $job = Start-Job -ScriptBlock {
+                param($ScriptPath, $Params)
+                & $ScriptPath @Params
+            } -ArgumentList $mScript, $gParams
+
+            $jobs[$mid] = @{ Job = $job; Monkey = $monkey }
+        }
+
+        # Wait for all jobs with progress reporting
+        Write-Host ""
+        $totalJobs = $jobs.Count
+        $completed = 0
+
+        while ($jobs.Values | Where-Object { $_.Job.State -eq 'Running' }) {
+            Start-Sleep -Seconds 5
+            $nowComplete = @($jobs.Values | Where-Object { $_.Job.State -ne 'Running' }).Count
+            if ($nowComplete -gt $completed) {
+                $completed = $nowComplete
+                $elapsed = ((Get-Date) - $genStartTime).ToString('mm\:ss')
+                Write-Host "    ⏱️  $completed/$totalJobs gen jobs complete ($elapsed elapsed)" -ForegroundColor DarkGray
+            }
+        }
+
+        # Collect results
+        $genSuccessCount = 0
+        $genFailCount = 0
+
+        foreach ($mid in $jobs.Keys) {
+            $jobInfo = $jobs[$mid]
+            try {
+                $genResult = Receive-Job -Job $jobInfo.Job -ErrorAction Stop
+                Remove-Job -Job $jobInfo.Job -Force
+
+                if ($genResult -and $genResult.Status -eq 'gen-complete' -and $genResult.Questions -and $genResult.Questions.Count -gt 0) {
+                    $parallelGenResults[$mid] = $genResult.Questions
+                    $genSuccessCount++
+                    Write-Host "    ✅ $($jobInfo.Monkey.Emoji) $($jobInfo.Monkey.Name): $($genResult.Count) questions generated" -ForegroundColor Green
+                } else {
+                    $genFailCount++
+                    Write-Host "    ⚠️  $($jobInfo.Monkey.Emoji) $($jobInfo.Monkey.Name): gen returned no questions — will run sequentially" -ForegroundColor Yellow
+                }
+            }
+            catch {
+                Remove-Job -Job $jobInfo.Job -Force -ErrorAction SilentlyContinue
+                $genFailCount++
+                Write-Host "    ❌ $($jobInfo.Monkey.Emoji) $($jobInfo.Monkey.Name): gen failed — $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "       Will fall back to sequential gen+answer" -ForegroundColor DarkYellow
+            }
+        }
+
+        $genElapsed = ((Get-Date) - $genStartTime).ToString('mm\:ss')
+        $totalQs = ($parallelGenResults.Values | ForEach-Object { $_.Count } | Measure-Object -Sum).Sum
+        Write-Host ""
+        Write-Host "  ⚡ Parallel gen complete: $genSuccessCount succeeded, $genFailCount failed ($totalQs total questions in $genElapsed)" -ForegroundColor Magenta
+        Write-Host ""
+
+        # Save genPhase in checkpoint
+        $runCheckpoint.genPhase = @{
+            status    = 'complete'
+            elapsed   = $genElapsed
+            monkeys   = @{}
+        }
+        foreach ($mid in $parallelGenResults.Keys) {
+            $runCheckpoint.genPhase.monkeys[$mid] = @{ questionCount = $parallelGenResults[$mid].Count }
+        }
+        Save-RunCheckpoint -OutputRoot $outputRoot -CheckpointData $runCheckpoint
+    }
+    else {
+        Write-Step "ParallelGen: only $($genEligible.Count) eligible monkey(s) — using sequential mode" "INFO"
+    }
+}
 
 foreach ($monkey in $config.OrderedMonkeys) {
     $monkeyId = $monkey.Id
@@ -579,6 +715,12 @@ foreach ($monkey in $config.OrderedMonkeys) {
             if ($config.GeorgeFixMode)            { $monkeyParams.FixMode = $config.GeorgeFixMode }
             if ($config.GeorgeDiscoveryMode)      { $monkeyParams.DiscoveryMode = $config.GeorgeDiscoveryMode }
         }
+    }
+
+    # Pass pre-generated questions if available from parallel gen
+    if ($parallelGenResults.ContainsKey($monkeyId) -and $parallelGenResults[$monkeyId].Count -gt 0) {
+        $monkeyParams.PreGenQuestions = $parallelGenResults[$monkeyId]
+        Write-Host "    ⚡ Using $($parallelGenResults[$monkeyId].Count) pre-generated questions from parallel gen" -ForegroundColor Magenta
     }
 
     # Run the monkey
