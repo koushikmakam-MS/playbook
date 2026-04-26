@@ -63,6 +63,7 @@ param(
     [int]$RetryBaseDelay = 30,
     [int]$CallTimeout = 300,
     [int]$BatchSize = 5,
+    [int]$RiskBatchSize = 10,
     [int]$MaxQuestions = 0,
 
     [switch]$Incremental,
@@ -464,12 +465,13 @@ function New-RiskQuestions {
     <#
     .SYNOPSIS
         Generates targeted questions for risky files using Copilot.
-        Questions are biased by detected risk patterns.
+        Batches multiple risk files per Copilot call for efficiency.
     #>
     param(
         [array]$FileRisks,
         [string]$WorkDir,
-        [string]$SelectedModel
+        [string]$SelectedModel,
+        [int]$RiskBatchSize = 10
     )
 
     # Filter by minimum severity
@@ -479,37 +481,77 @@ function New-RiskQuestions {
         return @()
     }
 
-    Write-Phase "PHASE 3" "Question Generation — Generating questions for $($eligible.Count) risky files"
+    Write-Phase "PHASE 3" "Question Generation — $($eligible.Count) risky files (batch size $RiskBatchSize)"
 
     # Weight questions by severity score (more risk → more questions)
     $totalSeverity = ($eligible | Measure-Object -Property SeverityScore -Sum).Sum
     if ($totalSeverity -eq 0) { $totalSeverity = 1 }
 
-    $allQuestions = @()
-    $generated = 0
-
+    # Pre-compute qCount for each eligible file
     foreach ($risk in $eligible) {
-        $generated++
-
-        # Weighted question count: proportional to severity, min 1, max QuestionsPerFile
         $proportion = $risk.SeverityScore / $totalSeverity
         $qCount = [Math]::Max(1, [Math]::Min($QuestionsPerFile, [Math]::Ceiling($proportion * $eligible.Count * $QuestionsPerFile / $eligible.Count * 2)))
-        $qCount = [Math]::Min($qCount, $QuestionsPerFile)
+        $risk | Add-Member -NotePropertyName '_qCount' -NotePropertyValue ([Math]::Min($qCount, $QuestionsPerFile)) -Force
+    }
 
-        # Build risk context for the prompt
+    $allQuestions = @()
+
+    # ── Helper: parse structured questions from copilot output ──
+    function Parse-StructuredQuestions {
+        param([string]$RawOutput, $DefaultRisk)
+        $questions = @()
+        try {
+            $cleaned = $RawOutput.Trim()
+            if ($cleaned -match '```(?:json)?\s*\n?([\s\S]*?)\n?\s*```') { $cleaned = $Matches[1].Trim() }
+            $parsed = @($cleaned | ConvertFrom-Json)
+            foreach ($q in $parsed) {
+                $questions += @{
+                    Question      = $q.question
+                    Category      = if ($q.category) { $q.category } else { $DefaultRisk.Categories[0] }
+                    TargetPattern = if ($q.target_pattern) { $q.target_pattern } else { "General" }
+                    Severity      = if ($q.severity) { $q.severity } else { "MEDIUM" }
+                    SourceFile    = $null  # filled by caller
+                    FileSeverity  = 0      # filled by caller
+                }
+            }
+        }
+        catch {
+            $questionLines = $RawOutput -split "`n" | Where-Object { $_ -match '\?\s*$' -or $_ -match '^\d+[\.\)]\s+' }
+            foreach ($line in $questionLines) {
+                $cleanLine = $line -replace '^\d+[\.\)]\s*', '' -replace '^\s*[-•]\s*', ''
+                if ($cleanLine.Length -gt 15) {
+                    $questions += @{
+                        Question      = $cleanLine.Trim()
+                        Category      = if ($DefaultRisk) { $DefaultRisk.Categories[0] } else { "SECURITY" }
+                        TargetPattern = "General"
+                        Severity      = "MEDIUM"
+                        SourceFile    = $null
+                        FileSeverity  = 0
+                    }
+                }
+            }
+            if ($questions.Count -gt 0) {
+                Write-Host "    📝 JSON parse failed, extracted $($questions.Count) questions from text" -ForegroundColor DarkYellow
+            }
+        }
+        return ,$questions
+    }
+
+    # ── Helper: single-file fallback ──
+    function Invoke-SingleRiskFile {
+        param($Risk)
         $riskContext = @()
-        foreach ($finding in $risk.Findings) {
+        foreach ($finding in $Risk.Findings) {
             $lineExamples = @($finding.Lines | Select-Object -First 3 | ForEach-Object { "Line $($_.Line): $($_.Snippet)" }) -join "; "
             $riskContext += "- [$($finding.Category)] $($finding.Description) ($($finding.MatchCount) occurrences): $lineExamples"
         }
         $riskContextStr = $riskContext -join "`n"
-
         $prompt = @"
-You are a security and reliability analyst. I found these risky patterns in the file '$($risk.File)':
+You are a security and reliability analyst. I found these risky patterns in the file '$($Risk.File)':
 
 $riskContextStr
 
-Generate exactly $qCount targeted questions that would help identify, document, or fix these risks.
+Generate exactly $($Risk._qCount) targeted questions that would help identify, document, or fix these risks.
 
 RULES:
 - Questions must reference the SPECIFIC file and patterns found
@@ -521,8 +563,66 @@ RULES:
 Return as JSON array: [{"question":"...", "category":"SECURITY|EDGE_CASE|CRASH", "target_pattern":"PatternName", "severity":"HIGH|MEDIUM|LOW"}]
 Return ONLY the JSON array, no markdown fences, no explanation.
 "@
+        $response = Invoke-CopilotWithRetry -Prompt $prompt -WorkingDirectory $WorkDir `
+            -ModelName $SelectedModel -Retries $MaxRetries `
+            -BaseDelay $RetryBaseDelay -Timeout $CallTimeout `
+            -ShowVerbose:$ShowVerbose
+        if (-not $response -or -not $response.Success -or -not $response.Output.Trim()) { return }
+        $qs = Parse-StructuredQuestions -RawOutput $response.Output -DefaultRisk $Risk
+        foreach ($q in $qs) {
+            $q.SourceFile = $Risk.File
+            $q.FileSeverity = $Risk.SeverityScore
+        }
+        return ,$qs
+    }
 
-        Write-Host "  [$generated/$($eligible.Count)] Generating $qCount questions for $($risk.File)..." -ForegroundColor DarkGray
+    # ── Chunk eligible into batches ──
+    $batches = @()
+    for ($i = 0; $i -lt $eligible.Count; $i += $RiskBatchSize) {
+        $end = [Math]::Min($i + $RiskBatchSize, $eligible.Count)
+        $batches += ,@($eligible[$i..($end - 1)])
+    }
+    $totalBatches = $batches.Count
+    $batchNum = 0
+    $earlyExit = $false
+
+    foreach ($batch in $batches) {
+        $batchNum++
+        Write-Progress -Activity "Generating risk questions" -Status "Batch $batchNum/$totalBatches ($($batch.Count) files)" -PercentComplete ([Math]::Round(($batchNum / [Math]::Max($totalBatches, 1)) * 100))
+
+        # Build multi-file prompt
+        $filesBlock = ""
+        $fIdx = 0
+        $batchQCounts = @()
+        foreach ($risk in $batch) {
+            $fIdx++
+            $riskContext = @()
+            foreach ($finding in $risk.Findings) {
+                $lineExamples = @($finding.Lines | Select-Object -First 3 | ForEach-Object { "Line $($_.Line): $($_.Snippet)" }) -join "; "
+                $riskContext += "- [$($finding.Category)] $($finding.Description) ($($finding.MatchCount) occurrences): $lineExamples"
+            }
+            $filesBlock += "File $fIdx`: $($risk.File)`n$($riskContext -join "`n")`n`n"
+            $batchQCounts += $risk._qCount
+        }
+
+        $totalExpected = ($batchQCounts | Measure-Object -Sum).Sum
+        $prompt = @"
+You are a security and reliability analyst. I found risky patterns in these files:
+
+$filesBlock
+For EACH file, generate targeted questions that would help identify, document, or fix the risks found.
+Total questions expected: $totalExpected (proportional to each file's risk severity).
+
+RULES:
+- Questions must reference the SPECIFIC file and patterns found
+- Mix question types: "Is this pattern safe because...", "What happens if...", "How should we fix..."
+- Prioritize SECURITY > CRASH > EDGE_CASE
+- Each question should be self-contained and actionable
+
+Return as JSON array: [{"question":"...", "category":"SECURITY|EDGE_CASE|CRASH", "target_pattern":"PatternName", "severity":"HIGH|MEDIUM|LOW"}]
+Return ONLY the JSON array, no markdown fences, no explanation.
+"@
+        Write-Step "[Batch $batchNum/$totalBatches] Generating questions for $($batch.Count) risky files..." "INFO"
 
         $response = Invoke-CopilotWithRetry -Prompt $prompt -WorkingDirectory $WorkDir `
             -ModelName $SelectedModel -Retries $MaxRetries `
@@ -530,65 +630,64 @@ Return ONLY the JSON array, no markdown fences, no explanation.
             -ShowVerbose:$ShowVerbose
 
         if (-not $response -or -not $response.Success -or -not $response.Output.Trim()) {
-            Write-Host "    ⚠️ Empty response, skipping" -ForegroundColor Yellow
+            Write-Step "[Batch $batchNum] Batch call failed — falling back to per-file" "WARN"
+            foreach ($risk in $batch) {
+                Write-Host "  [fallback] Generating for $($risk.File)..." -ForegroundColor DarkGray
+                $qs = Invoke-SingleRiskFile -Risk $risk
+                if ($qs -and $qs.Count -gt 0) {
+                    $allQuestions += $qs
+                    Write-Host "    ✅ $($qs.Count) questions generated" -ForegroundColor DarkGreen
+                }
+                if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) { $earlyExit = $true; break }
+            }
+            if ($earlyExit) { Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; break }
             continue
         }
 
-        # Parse response — try JSON first, fallback to line extraction
-        $questions = @()
-        try {
-            $cleaned = $response.Output.Trim()
-            # Strip markdown fences if present
-            if ($cleaned -match '```(?:json)?\s*\n?([\s\S]*?)\n?\s*```') {
-                $cleaned = $Matches[1].Trim()
-            }
-            $parsed = @($cleaned | ConvertFrom-Json)
-            foreach ($q in $parsed) {
-                $questions += @{
-                    Question      = $q.question
-                    Category      = if ($q.category) { $q.category } else { $risk.Categories[0] }
-                    TargetPattern = if ($q.target_pattern) { $q.target_pattern } else { "General" }
-                    Severity      = if ($q.severity) { $q.severity } else { "MEDIUM" }
-                    SourceFile    = $risk.File
-                    FileSeverity  = $risk.SeverityScore
-                }
-            }
-        }
-        catch {
-            # Fallback: extract questions from lines
-            $questionLines = $response.Output -split "`n" | Where-Object { $_ -match '\?\s*$' -or $_ -match '^\d+[\.\)]\s+' }
-            foreach ($line in $questionLines) {
-                $cleanLine = $line -replace '^\d+[\.\)]\s*', '' -replace '^\s*[-•]\s*', ''
-                if ($cleanLine.Length -gt 15) {
-                    $questions += @{
-                        Question      = $cleanLine.Trim()
-                        Category      = $risk.Categories[0]
-                        TargetPattern = "General"
-                        Severity      = "MEDIUM"
-                        SourceFile    = $risk.File
-                        FileSeverity  = $risk.SeverityScore
-                    }
-                }
-            }
-            if ($questions.Count -gt 0) {
-                Write-Host "    📝 JSON parse failed, extracted $($questions.Count) questions from text" -ForegroundColor DarkYellow
-            }
-        }
-
+        $questions = Parse-StructuredQuestions -RawOutput $response.Output -DefaultRisk $batch[0]
         if ($questions.Count -eq 0) {
-            Write-Host "    ⚠️ No questions extracted for $($risk.File)" -ForegroundColor Yellow
+            Write-Step "[Batch $batchNum] No questions parsed — falling back to per-file" "WARN"
+            foreach ($risk in $batch) {
+                Write-Host "  [fallback] Generating for $($risk.File)..." -ForegroundColor DarkGray
+                $qs = Invoke-SingleRiskFile -Risk $risk
+                if ($qs -and $qs.Count -gt 0) {
+                    $allQuestions += $qs
+                    Write-Host "    ✅ $($qs.Count) questions generated" -ForegroundColor DarkGreen
+                }
+                if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) { $earlyExit = $true; break }
+            }
+            if ($earlyExit) { Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; break }
             continue
+        }
+
+        # Round-robin distribute questions to batch items by qCount
+        $qi = 0
+        for ($fi = 0; $fi -lt $batch.Count; $fi++) {
+            $risk = $batch[$fi]
+            $assignCount = $risk._qCount
+            for ($a = 0; $a -lt $assignCount -and $qi -lt $questions.Count; $a++) {
+                $questions[$qi].SourceFile = $risk.File
+                $questions[$qi].FileSeverity = $risk.SeverityScore
+                $qi++
+            }
+        }
+        # Any remaining questions go to the last file
+        while ($qi -lt $questions.Count) {
+            $questions[$qi].SourceFile = $batch[-1].File
+            $questions[$qi].FileSeverity = $batch[-1].SeverityScore
+            $qi++
         }
 
         $allQuestions += $questions
-        Write-Host "    ✅ $($questions.Count) questions generated" -ForegroundColor DarkGreen
+        Write-Step "[Batch $batchNum] +$($questions.Count) questions ($($allQuestions.Count) total)" "OK"
 
-        # Early exit if MaxQuestions cap reached
         if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
             Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
-            break
+            $earlyExit = $true; break
         }
     }
+
+    Write-Progress -Activity "Generating risk questions" -Completed
 
     # Sort: HIGH severity first, then by file severity score
     $severityOrder = @{ "HIGH" = 0; "MEDIUM" = 1; "LOW" = 2 }
@@ -686,7 +785,7 @@ $fileRisks | ConvertTo-Json -Depth 10 | Set-Content $riskScanPath -Encoding UTF8
 Write-Host "  💾 Risk scan saved: $riskScanPath" -ForegroundColor DarkGray
 
 # ── Phase 3: Question Generation ─────────────────────────────────────
-$questions = New-RiskQuestions -FileRisks $fileRisks -WorkDir $workDir -SelectedModel $selectedModel
+$questions = New-RiskQuestions -FileRisks $fileRisks -WorkDir $workDir -SelectedModel $selectedModel -RiskBatchSize $RiskBatchSize
 
 if ($questions.Count -eq 0) {
     Write-Host "❌ No questions generated. Check risk scan results." -ForegroundColor Red
