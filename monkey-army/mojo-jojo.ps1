@@ -744,6 +744,15 @@ else {
 
 $sessionLogsDir = Join-Path $outputPath "session-logs"
 
+# Fast-path: GenOnly + checkpoint exists → skip discovery entirely
+if ($GenOnly) {
+    $savedQ = Get-QuestionCheckpoint -OutputPath $outputPath
+    if ($savedQ -and $savedQ.Count -gt 0) {
+        Write-Step "Loaded $($savedQ.Count) questions from checkpoint — skipping discovery" "OK"
+        return @{ Questions = $savedQ; Status = 'gen-complete'; MonkeyName = $MONKEY_NAME; Count = $savedQ.Count }
+    }
+}
+
 # ── Phase 2: Risk Scan ───────────────────────────────────────────────
 $scanFiles = Get-ScanFiles -WorkDir $workDir
 if ($scanFiles.Count -eq 0) {
