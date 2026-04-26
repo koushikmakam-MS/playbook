@@ -591,8 +591,18 @@ function Invoke-CopilotBatch {
         if ($exDir)  { $routingRules += "- Code exemplars and implementation guides → ``$exDir/``" }
         if ($rootDoc) { $routingRules += "- Only top-level index files (like Glossary, doc_registry) belong in ``$rootDoc/`` root" }
 
+        # Build tracking file update rules
+        $trackingRules = @()
+        if ($wfDir) { $trackingRules += "- After creating a doc in ``$wfDir/``, add an entry to ``$wfDir/README.md`` index table" }
+        if ($adrDir) { $trackingRules += "- After creating a doc in ``$adrDir/``, add an entry to ``$adrDir/README.md`` index table" }
+        if ($rootDoc) { $trackingRules += "- After creating any new doc, add it to ``$rootDoc/doc_registry.md`` if that file exists" }
+
         if ($routingRules.Count -gt 0) {
-            $docDirHint = ". IMPORTANT — place new doc files in the correct subfolder:`n$($routingRules -join "`n")`nMatch the naming convention of existing files in each folder (e.g. numbered prefixes like 07_*, snake_case, kebab-case). NEVER create docs in the root docs folder"
+            $trackingBlock = ""
+            if ($trackingRules.Count -gt 0) {
+                $trackingBlock = "`nAfter creating or updating docs, update these tracking files:`n$($trackingRules -join "`n")"
+            }
+            $docDirHint = ". IMPORTANT — place new doc files in the correct subfolder:`n$($routingRules -join "`n")`nMatch the naming convention of existing files in each folder (e.g. numbered prefixes like 07_*, snake_case, kebab-case). NEVER create docs in the root docs folder${trackingBlock}"
         } else {
             $topDirs = $DocDirectories | Select-Object -First 5
             $docDirHint = " in these doc directories: $($topDirs -join ', ')"
@@ -1679,7 +1689,15 @@ function Invoke-SingleQuestion {
         if ($exDir)  { $routingRules += "exemplars/implementation guides → ``$exDir/``" }
 
         if ($routingRules.Count -gt 0) {
-            $singleDocDirHint = ". Place new docs in the correct subfolder: $($routingRules -join '; '). Match existing naming conventions (numbered prefixes, snake_case, etc). NEVER create docs in the root docs folder"
+            # Build tracking file update hint
+            $trackingHints = @()
+            if ($wfDir) { $trackingHints += "update ``$wfDir/README.md`` index" }
+            if ($adrDir) { $trackingHints += "update ``$adrDir/README.md`` index" }
+            $rootDoc = $DocDirectories | Where-Object { $_ -notmatch 'workflows|adr|exemplar|security|bug' } | Select-Object -First 1
+            if ($rootDoc) { $trackingHints += "update ``$rootDoc/doc_registry.md``" }
+            $trackingSuffix = if ($trackingHints.Count -gt 0) { ". After creating docs: $($trackingHints -join '; ')" } else { "" }
+
+            $singleDocDirHint = ". Place new docs in the correct subfolder: $($routingRules -join '; '). Match existing naming conventions (numbered prefixes, snake_case, etc). NEVER create docs in the root docs folder${trackingSuffix}"
         } else {
             $topDirs = $DocDirectories | Select-Object -First 5
             $singleDocDirHint = " in these doc directories: $($topDirs -join ', ')"
