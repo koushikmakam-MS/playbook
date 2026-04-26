@@ -238,6 +238,10 @@ function New-CoverageQuestions {
             $hash = Get-QuestionHash -Text $q
             if (-not $questionHashes.ContainsKey($hash)) { $questionHashes[$hash] = $true; $allQuestions += @{ EntryPoint=$gap.SourceFile; Question=$q; Category="UNTESTED" } }
         }
+        if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
+            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
+            break
+        }
     }
 
     foreach ($gap in $Findings.UnderTested) {
@@ -251,6 +255,10 @@ function New-CoverageQuestions {
             $hash = Get-QuestionHash -Text $q
             if (-not $questionHashes.ContainsKey($hash)) { $questionHashes[$hash] = $true; $allQuestions += @{ EntryPoint=$gap.SourceFile; Question=$q; Category="UNDER_TESTED" } }
         }
+        if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
+            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
+            break
+        }
     }
 
     foreach ($gap in $Findings.TestlessDirs) {
@@ -263,6 +271,10 @@ function New-CoverageQuestions {
         foreach ($q in (ConvertFrom-CopilotQuestionResponse -Result $result -Label $gap.Directory)) {
             $hash = Get-QuestionHash -Text $q
             if (-not $questionHashes.ContainsKey($hash)) { $questionHashes[$hash] = $true; $allQuestions += @{ EntryPoint=$gap.Directory; Question=$q; Category="TESTLESS_DIR" } }
+        }
+        if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
+            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
+            break
         }
     }
 
@@ -352,9 +364,11 @@ function Start-DonkeyKong {
             return New-MonkeyResult -MonkeyName $script:MONKEY_NAME -Duration $duration -Model $script:SelectedModel -ExitStatus 'SUCCESS' -QuestionsAsked 0 -QuestionsAnswered 0
         }
 
+        $docDirs = Get-DocDirectories -RootDir $workDir
         $execStats = Invoke-MonkeyQuestions -Questions $questions -WorkingDirectory $workDir `
             -OutputPath $script:OutputPath -ModelName $script:SelectedModel -MonkeyEmoji $script:MONKEY_EMOJI `
-            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -BatchSize $BatchSize -MaxQuestions $MaxQuestions -ShowVerbose:$ShowVerbose
+            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -BatchSize $BatchSize -MaxQuestions $MaxQuestions `
+            -DocDirectories $docDirs -ShowVerbose:$ShowVerbose
 
         $filesChanged = 0
         if (-not $Internal) {

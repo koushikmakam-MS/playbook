@@ -569,12 +569,20 @@ function Invoke-CopilotBatch {
         [int]$Retries = 2,
         [int]$BaseDelay = 30,
         [int]$TimeoutPerQuestion = 60,
+        [string[]]$DocDirectories = @(),
         [switch]$ShowVerbose
     )
 
     $batchId = [guid]::NewGuid().ToString('N').Substring(0, 8)
     $totalTimeout = [Math]::Max($Questions.Count * $TimeoutPerQuestion, 300)
     $useFileMode = $Questions.Count -ge 20
+
+    # ── Build doc directory hint for prompts ──
+    $docDirHint = ""
+    if ($DocDirectories.Count -gt 0) {
+        $topDirs = $DocDirectories | Select-Object -First 5
+        $docDirHint = " in these doc directories: $($topDirs -join ', ')"
+    }
 
     # ── Build question block ──
     $questionBlock = ""
@@ -585,7 +593,7 @@ function Invoke-CopilotBatch {
 
 --- QUESTION [$batchId-$idx] ---
 $($q.Question)${ep}
-If relevant documentation for this topic is missing or incomplete in the repo, create or update it following existing doc patterns.
+If relevant documentation for this topic is missing or incomplete in the repo, create or update it${docDirHint} following existing doc patterns.
 
 "@
     }
@@ -601,7 +609,7 @@ If relevant documentation for this topic is missing or incomplete in the repo, c
         $fileContent = @"
 # Batch $batchId — $($Questions.Count) Questions
 
-Answer each question below about this codebase and update or add relevant docs.
+Answer each question below about this codebase and update or add relevant docs${docDirHint}.
 Before each answer, output:
 >>> ANSWER [$batchId-<N>] <<<
 After your last answer, output:
@@ -621,7 +629,7 @@ Read the questions file at ``$relBatchPath`` and answer all $($Questions.Count) 
 IMPORTANT formatting rules:
 - Before each answer, output exactly: >>> ANSWER [$batchId-N] <<< (where N is the question number)
 - After your last answer, output: >>> BATCH DONE [$batchId] <<<
-- Answer each question AND update or add relevant docs in the repo following existing doc patterns.
+- Answer each question AND update or add relevant docs${docDirHint} following existing doc patterns.
 
 Start now — read the file, answer all questions, and create or update documentation.
 "@
@@ -904,6 +912,30 @@ function Select-IncrementalEntryPoints {
 }
 
 # ─────────────────────────────────────────────
+# Region: Doc-Directory Discovery
+# ─────────────────────────────────────────────
+
+function Get-DocDirectories {
+    <#
+    .SYNOPSIS
+        Discovers documentation directories under a repo root for prompt guidance.
+    .PARAMETER RootDir
+        The repository root directory to scan.
+    .OUTPUTS
+        [string[]] Relative paths (forward-slash separated) of doc directories found.
+    #>
+    param([string]$RootDir)
+    $dirs = @(Get-ChildItem -Path $RootDir -Recurse -Directory -ErrorAction SilentlyContinue |
+        Where-Object {
+            $rel = $_.FullName.Substring($RootDir.Length + 1).Replace('\', '/')
+            $rel -match '^docs(/|$)' -or $rel -match 'agentKT' -or $rel -match 'workflows' -or $rel -match '/adr(/|$)'
+        } |
+        ForEach-Object { $_.FullName.Substring($RootDir.Length + 1).Replace('\', '/') } |
+        Sort-Object |
+        Select-Object -First 10)
+    return ,$dirs
+}
+
 # Region: Doc-Reference Parsing
 # ─────────────────────────────────────────────
 
@@ -1333,6 +1365,7 @@ function Invoke-MonkeyQuestions {
         [int]$CallTimeout = 300,
         [int]$BatchSize = 50,
         [int]$MaxQuestions = 0,
+        [string[]]$DocDirectories = @(),
         [switch]$ShowVerbose
     )
 
@@ -1366,17 +1399,13 @@ function Invoke-MonkeyQuestions {
 
     # Load checkpoint — skip already-completed questions
     $completedIds = Get-BatchCheckpoint -OutputPath $OutputPath
-    if ($completedIds.Count -gt 0) {
+    $alreadyDone = $completedIds.Count
+    if ($alreadyDone -gt 0) {
         $beforeCount = $Questions.Count
         $Questions = @($Questions | Where-Object { -not $completedIds.Contains($_.QuestionId) })
-        Write-Step "Checkpoint: $($completedIds.Count) already done, $($Questions.Count)/$beforeCount remaining" "OK"
     }
 
     $totalQ = $Questions.Count
-    if ($totalQ -eq 0) {
-        Write-Step "All questions already completed (checkpoint)" "OK"
-        return $stats
-    }
 
     # ── f07: Simple question dedup — remove near-duplicate questions ──
     $seen = @{}
@@ -1396,16 +1425,27 @@ function Invoke-MonkeyQuestions {
     }
 
     # ── f03: Cap questions if MaxQuestions is set ──
-    if ($MaxQuestions -gt 0 -and $totalQ -gt $MaxQuestions) {
-        Write-Step "Capping questions from $totalQ to $MaxQuestions (MaxQuestions limit)" "WARN"
-        $Questions = @($Questions | Select-Object -First $MaxQuestions)
-        $totalQ = $MaxQuestions
+    if ($MaxQuestions -gt 0 -and $totalQ -gt ($MaxQuestions - $alreadyDone)) {
+        $effectiveCap = [Math]::Max(0, $MaxQuestions - $alreadyDone)
+        Write-Step "Capping remaining questions from $totalQ to $effectiveCap (MaxQuestions=$MaxQuestions, already done=$alreadyDone)" "WARN"
+        $Questions = @($Questions | Select-Object -First $effectiveCap)
+        $totalQ = $Questions.Count
+    }
+
+    # Show checkpoint resume info AFTER cap is applied
+    if ($alreadyDone -gt 0) {
+        Write-Step "Checkpoint: $alreadyDone already done, $totalQ remaining" "OK"
+    }
+
+    if ($totalQ -eq 0) {
+        Write-Step "All questions already completed (checkpoint)" "OK"
+        return $stats
     }
 
     # ── f06: Show ETA estimate ──
     if ($useBatch) {
         $batchCount = [Math]::Ceiling($totalQ / $BatchSize)
-        $estMinutes = [Math]::Ceiling($batchCount * 1.5)  # ~90s per batch average
+        $estMinutes = [Math]::Ceiling($batchCount * 5)  # ~5 min per batch average
         Write-Step "Estimated: $batchCount batches, ~${estMinutes} min" "INFO"
     } else {
         $estMinutes = [Math]::Ceiling($totalQ * 0.75)  # ~45s per question average
@@ -1454,7 +1494,8 @@ function Invoke-MonkeyQuestions {
                     -SharePath $sharePath `
                     -Retries $MaxRetries `
                     -BaseDelay $RetryBaseDelay `
-                    -TimeoutPerQuestion $CallTimeout `
+                    -TimeoutPerQuestion $(if ($BatchSize -gt 1) { [Math]::Min(60, $CallTimeout) } else { $CallTimeout }) `
+                    -DocDirectories $DocDirectories `
                     -ShowVerbose:$ShowVerbose
 
                 $stats.BatchesRun++
@@ -1471,7 +1512,7 @@ function Invoke-MonkeyQuestions {
 
                     foreach ($q in $batch) {
                         $stats.FallbackSingles++
-                        $singleResult = Invoke-SingleQuestion -Question $q -WorkingDirectory $WorkingDirectory -OutputPath $OutputPath -ModelName $ModelName -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -ShowVerbose:$ShowVerbose -Stats $stats -FailedQuestions ([ref]$failedQuestions) -GlobalIndex ($processedQ - $batch.Count + $q.BatchIndex)
+                        $singleResult = Invoke-SingleQuestion -Question $q -WorkingDirectory $WorkingDirectory -OutputPath $OutputPath -ModelName $ModelName -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -DocDirectories $DocDirectories -ShowVerbose:$ShowVerbose -Stats $stats -FailedQuestions ([ref]$failedQuestions) -GlobalIndex ($processedQ - $batch.Count + $q.BatchIndex)
                         [void]$completedIds.Add($q.QuestionId)
                     }
                     Save-BatchCheckpoint -OutputPath $OutputPath -CompletedIds $completedIds
@@ -1516,7 +1557,7 @@ function Invoke-MonkeyQuestions {
                         Write-Step "  Q$($qr.BatchIndex) failed in batch — retrying single" "WARN"
                         $origQ = $batch | Where-Object { $_.QuestionId -eq $qr.QuestionId }
                         if ($origQ) {
-                            Invoke-SingleQuestion -Question $origQ -WorkingDirectory $WorkingDirectory -OutputPath $OutputPath -ModelName $ModelName -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -ShowVerbose:$ShowVerbose -Stats $stats -FailedQuestions ([ref]$failedQuestions) -GlobalIndex ($processedQ - $batch.Count + $qr.BatchIndex)
+                            Invoke-SingleQuestion -Question $origQ -WorkingDirectory $WorkingDirectory -OutputPath $OutputPath -ModelName $ModelName -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -DocDirectories $DocDirectories -ShowVerbose:$ShowVerbose -Stats $stats -FailedQuestions ([ref]$failedQuestions) -GlobalIndex ($processedQ - $batch.Count + $qr.BatchIndex)
                         }
                         else {
                             $stats.Failed++
@@ -1538,6 +1579,12 @@ function Invoke-MonkeyQuestions {
                 }
 
                 Save-BatchCheckpoint -OutputPath $OutputPath -CompletedIds $completedIds
+
+                # Break early if MaxQuestions cap reached
+                if ($MaxQuestions -gt 0 -and $completedIds.Count -ge $MaxQuestions) {
+                    Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping batch execution" "WARN"
+                    break
+                }
             }
         }
         else {
@@ -1547,7 +1594,7 @@ function Invoke-MonkeyQuestions {
             $currentQ = 0
             foreach ($q in $Questions) {
                 $currentQ++
-                Invoke-SingleQuestion -Question $q -WorkingDirectory $WorkingDirectory -OutputPath $OutputPath -ModelName $ModelName -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -ShowVerbose:$ShowVerbose -Stats $stats -FailedQuestions ([ref]$failedQuestions) -GlobalIndex $currentQ -TotalQ $totalQ -MonkeyEmoji $MonkeyEmoji
+                Invoke-SingleQuestion -Question $q -WorkingDirectory $WorkingDirectory -OutputPath $OutputPath -ModelName $ModelName -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -DocDirectories $DocDirectories -ShowVerbose:$ShowVerbose -Stats $stats -FailedQuestions ([ref]$failedQuestions) -GlobalIndex $currentQ -TotalQ $totalQ -MonkeyEmoji $MonkeyEmoji
                 [void]$completedIds.Add($q.QuestionId)
                 Save-BatchCheckpoint -OutputPath $OutputPath -CompletedIds $completedIds
             }
@@ -1587,6 +1634,7 @@ function Invoke-SingleQuestion {
         [int]$MaxRetries = 3,
         [int]$RetryBaseDelay = 30,
         [int]$CallTimeout = 300,
+        [string[]]$DocDirectories = @(),
         [switch]$ShowVerbose,
         [hashtable]$Stats,
         [ref]$FailedQuestions,
@@ -1604,7 +1652,13 @@ function Invoke-SingleQuestion {
 
     $beforeStatus = & git --no-pager status --porcelain 2>&1
 
-    $docHealSuffix = " If relevant documentation for this topic is missing or incomplete in the repo, create or update it following existing doc patterns."
+    $singleDocDirHint = ""
+    if ($DocDirectories.Count -gt 0) {
+        $topDirs = $DocDirectories | Select-Object -First 5
+        $singleDocDirHint = " in these doc directories: $($topDirs -join ', ')"
+    }
+
+    $docHealSuffix = " If relevant documentation for this topic is missing or incomplete in the repo, create or update it${singleDocDirHint} following existing doc patterns."
     $prompt = if ($q.EntryPoint) {
         "Regarding the file '$($q.EntryPoint)': $($q.Question)$docHealSuffix"
     } else {
@@ -2413,6 +2467,7 @@ Export-ModuleMember -Function @(
     'Save-IncrementalState'
     'Get-ChangedFiles'
     'Select-IncrementalEntryPoints'
+    'Get-DocDirectories'
     'Get-DocReferences'
     'Invoke-MonkeySetup'
     'Test-Preflight'

@@ -495,6 +495,12 @@ Example: ["What is the expected request body schema for $($gap.Method) $($gap.Pa
         else {
             Write-Step "Failed to generate gap questions for $($gap.Path)" "WARN"
         }
+
+        # Early exit if MaxQuestions cap reached
+        if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
+            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
+            break
+        }
     }
 
     # ── Endpoint documentation questions: for each code endpoint ──
@@ -550,6 +556,12 @@ Output ONLY a JSON array of strings. No explanation, no markdown fences.
                     }
                 }
             }
+        }
+
+        # Early exit if MaxQuestions cap reached
+        if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
+            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
+            break
         }
     }
 
@@ -653,9 +665,11 @@ function Start-KingLouie {
         }
 
         # ── Phase 4: Execution (shared) ──
+        $docDirs = Get-DocDirectories -RootDir $workDir
         $execStats = Invoke-MonkeyQuestions -Questions $questions -WorkingDirectory $workDir `
             -OutputPath $script:OutputPath -ModelName $script:SelectedModel -MonkeyEmoji $script:MONKEY_EMOJI `
-            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -BatchSize $BatchSize -MaxQuestions $MaxQuestions -ShowVerbose:$ShowVerbose
+            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -BatchSize $BatchSize -MaxQuestions $MaxQuestions `
+            -DocDirectories $docDirs -ShowVerbose:$ShowVerbose
 
         # ── Phase 5: Commit/Stage + Report ──
         $filesChanged = 0

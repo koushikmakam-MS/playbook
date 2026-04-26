@@ -532,6 +532,12 @@ Example: ["What are the component boundaries between ModuleA and ModuleB, and wh
         }
 
         Write-Step "Generated $($questions.Count) unique questions ($($allQuestions.Count) total)" "OK"
+
+        # Early exit if MaxQuestions cap reached
+        if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
+            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
+            break
+        }
     }
 
     Write-Progress -Activity "Generating architecture questions" -Completed
@@ -635,9 +641,11 @@ function Start-DiddyKong {
         }
 
         # Phase 4: Execution (shared)
+        $docDirs = Get-DocDirectories -RootDir $workDir
         $execStats = Invoke-MonkeyQuestions -Questions $questions -WorkingDirectory $workDir `
             -OutputPath $script:OutputPath -ModelName $script:SelectedModel -MonkeyEmoji $script:MONKEY_EMOJI `
-            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -BatchSize $BatchSize -MaxQuestions $MaxQuestions -ShowVerbose:$ShowVerbose
+            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -BatchSize $BatchSize -MaxQuestions $MaxQuestions `
+            -DocDirectories $docDirs -ShowVerbose:$ShowVerbose
 
         # Phase 5: Commit/Stage (standalone only)
         $filesChanged = 0
