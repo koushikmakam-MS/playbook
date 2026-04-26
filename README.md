@@ -219,6 +219,18 @@ Or pick specific monkeys: `-Monkeys rafiki,mojo-jojo,marcel`
 # Custom monkeys with tuning
 .\Run-Player.ps1 -RepoPath "C:\myrepo" -Monkeys rafiki,abu,marcel `
   -QuestionsPerEntry 15 -CommitMode dry-run
+
+# Parallel question generation (gen phase runs all 7 monkeys simultaneously)
+.\Run-Player.ps1 -RepoPath "C:\myrepo" -Pack full -ParallelGen -CommitMode commit
+
+# Resume an interrupted run (skips completed monkeys + reuses generated questions)
+.\Run-Player.ps1 -RepoPath "C:\myrepo" -Pack full -Resume -CommitMode commit
+
+# Incremental mode — only process files changed since a ref
+.\Run-Player.ps1 -RepoPath "C:\myrepo" -Pack audit -Incremental -Since "HEAD~10"
+
+# Batch tuning — control how many questions per Copilot call
+.\Run-Player.ps1 -RepoPath "C:\myrepo" -Pack full -BatchSize 100 -CommitMode commit
 ```
 
 ### 📋 Multiple Repos (Run-PlayerList)
@@ -272,6 +284,96 @@ Or pick specific monkeys: `-Monkeys rafiki,mojo-jojo,marcel`
 .\monkey-army\rafiki.ps1 -RepoPath "C:\myrepo" -QuestionsPerEntry 5 -DryRun
 .\monkey-army\abu.ps1 -RepoPath "C:\myrepo" -QuestionsPerGap 3 -Commit
 .\monkey-army\mojo-jojo.ps1 -RepoPath "C:\myrepo" -QuestionsPerFile 5 -DryRun
+```
+
+---
+
+## CLI Reference
+
+### Run-Player.ps1 Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-RepoPath` | string | — | Local repo path |
+| `-RepoUrl` | string | — | Remote repo URL (cloned automatically) |
+| `-BaseBranch` | string | `main` | Branch to fork from |
+| `-Pack` | string | — | Monkey pack (`full`, `audit`, `security`, `docs`, `autonomous`, `quick`) |
+| `-Monkeys` | string | — | Comma-separated monkey names (overrides pack) |
+| `-CommitMode` | string | `dry-run` | `commit`, `dry-run`, or `stage` |
+| `-Model` | string | auto | AI model (`claude-sonnet-4`, `gpt-4.1`, etc.) |
+| `-QuestionsPerEntry` | int | 10 | Questions per entry point (Rafiki) |
+| `-BatchSize` | int | 50 | Questions per answer batch (0 = single mode) |
+| `-MaxQuestions` | int | 500 | Max questions per monkey |
+| `-NonInteractive` | switch | — | Skip wizard, use defaults |
+| `-ParallelGen` | switch | — | Run question gen for all monkeys in parallel |
+| `-Resume` | switch | — | Resume from last checkpoint |
+| `-CleanStart` | switch | — | Purge all checkpoints before running |
+| `-Incremental` | switch | — | Only process changed files |
+| `-Since` | string | — | Git ref or date for incremental mode |
+| `-CreatePR` | switch | — | Auto-create PR after commit |
+| `-HealMode` | switch | — | Re-run failed monkeys with escalated model |
+| `-ForcePlaybook` | switch | — | Re-run Playbook even if knowledge layer exists |
+| `-ShowVerbose` | switch | — | Show detailed Copilot output |
+| `-TargetAgents` | string[] | `copilot` | AI agents to score for (`copilot`, `cursor`, `claude`, etc.) |
+
+---
+
+## Advanced Features
+
+### ⚡ Parallel Question Generation
+
+Use `-ParallelGen` to run the question generation phase for all 7 prompt-mode monkeys simultaneously using PowerShell jobs. Each monkey generates its questions in a separate process, then results are fed into the sequential answering phase.
+
+```powershell
+.\Run-Player.ps1 -RepoPath "C:\myrepo" -Pack full -ParallelGen -CommitMode commit
+```
+
+> **Note:** Parallel gen is API-bound — if your Copilot rate limit is shared across concurrent calls, you may see diminishing returns beyond 2–3 parallel jobs. A `-MaxParallelJobs` parameter is planned for fine-tuning concurrency.
+
+### 🔄 Checkpoint / Resume
+
+Playbook automatically saves progress after each monkey completes. If a run is interrupted (timeout, crash, network issue), resume exactly where you left off:
+
+```powershell
+# Resume interrupted run — skips completed monkeys, reuses generated questions
+.\Run-Player.ps1 -RepoPath "C:\myrepo" -Pack full -Resume -CommitMode commit
+
+# Force a clean start (purge all checkpoints)
+.\Run-Player.ps1 -RepoPath "C:\myrepo" -Pack full -CleanStart -CommitMode commit
+```
+
+**What gets checkpointed:**
+| Artifact | Location | Reused on resume? |
+|----------|----------|:-:|
+| Run progress (which monkeys completed) | `.monkey-output/run-checkpoint.json` | ✅ |
+| Generated questions per monkey | `.monkey-output/<monkey>/questions-checkpoint.json` | ✅ |
+| Working branch name | Embedded in checkpoint | ✅ |
+| Health baseline score | Embedded in checkpoint | ✅ |
+
+When `-ParallelGen` is combined with `-Resume`, the gen phase is skipped entirely if question checkpoints exist — saving significant time on re-runs.
+
+### 📦 Batch Question Generation
+
+Monkeys that generate questions from discovery data (Abu, Diddy Kong, Donkey Kong, King Louie, Mojo Jojo) now batch multiple items per Copilot call during the generation phase, reducing API calls by 5–10x:
+
+| Monkey | Batch strategy | Items per call |
+|--------|---------------|:-:|
+| 🐵 Abu | 10 doc gaps per call | 10 |
+| 🐒 Diddy Kong | 10 deps per call | 10 |
+| 👑 King Louie | 10 endpoints per call | 10 |
+| 🦹 Mojo Jojo | 10 risk files per call | 10 |
+| 🦍 Donkey Kong | 10 untested files per call | 10 |
+
+### 🔀 Incremental Mode
+
+Only process files changed since a git ref or date — ideal for PR-scoped documentation runs:
+
+```powershell
+# Changes since a branch point
+.\Run-Player.ps1 -RepoPath "C:\myrepo" -Incremental -Since "main" -Pack audit
+
+# Changes in last 10 commits
+.\Run-Player.ps1 -RepoPath "C:\myrepo" -Incremental -Since "HEAD~10" -Pack full
 ```
 
 ---
