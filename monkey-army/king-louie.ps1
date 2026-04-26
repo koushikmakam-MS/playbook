@@ -67,6 +67,7 @@ param(
     [int]$RetryBaseDelay = 30,
     [int]$CallTimeout = 300,
     [int]$BatchSize = 5,
+    [int]$MaxQuestions = 0,
 
     [switch]$Incremental,
 
@@ -654,7 +655,7 @@ function Start-KingLouie {
         # ── Phase 4: Execution (shared) ──
         $execStats = Invoke-MonkeyQuestions -Questions $questions -WorkingDirectory $workDir `
             -OutputPath $script:OutputPath -ModelName $script:SelectedModel -MonkeyEmoji $script:MONKEY_EMOJI `
-            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -BatchSize $BatchSize -ShowVerbose:$ShowVerbose
+            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -BatchSize $BatchSize -MaxQuestions $MaxQuestions -ShowVerbose:$ShowVerbose
 
         # ── Phase 5: Commit/Stage + Report ──
         $filesChanged = 0

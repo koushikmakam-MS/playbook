@@ -296,6 +296,52 @@ function Save-BatchCheckpoint {
     Move-Item $tmpPath $cpPath -Force
 }
 
+function Save-QuestionCheckpoint {
+    <#
+    .SYNOPSIS
+        Saves generated questions to a checkpoint file so question generation
+        can be skipped on re-run. Each monkey calls this after generating questions.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$OutputPath,
+        [Parameter(Mandatory)][array]$Questions
+    )
+    $qcpPath = Join-Path $OutputPath "questions-checkpoint.json"
+    $tmpPath = "$qcpPath.tmp"
+    $data = @{
+        Questions   = $Questions
+        Count       = $Questions.Count
+        SavedAt     = (Get-Date).ToString('o')
+    }
+    $data | ConvertTo-Json -Depth 10 | Set-Content $tmpPath -Encoding UTF8
+    Move-Item $tmpPath $qcpPath -Force
+    Write-Step "Saved $($Questions.Count) questions to checkpoint" "OK"
+}
+
+function Get-QuestionCheckpoint {
+    <#
+    .SYNOPSIS
+        Loads previously generated questions from checkpoint file if it exists.
+        Returns $null if no checkpoint is found.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$OutputPath
+    )
+    $qcpPath = Join-Path $OutputPath "questions-checkpoint.json"
+    if (-not (Test-Path $qcpPath)) { return $null }
+    try {
+        $data = Get-Content $qcpPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($data.Questions -and $data.Questions.Count -gt 0) {
+            Write-Step "Loaded $($data.Questions.Count) questions from checkpoint (saved $($data.SavedAt))" "OK"
+            return @($data.Questions)
+        }
+    }
+    catch {
+        Write-Step "Question checkpoint unreadable — regenerating" "WARN"
+    }
+    return $null
+}
+
 # ─────────────────────────────────────────────
 # Region: Run Checkpoint (orchestrator-level resume)
 # ─────────────────────────────────────────────
@@ -450,6 +496,7 @@ function Show-RunCheckpointSummary {
     if (-not $monkeys) { return }
 
     $completedCount = 0
+    $skippedCount = 0
     $inProgressCount = 0
     $pendingCount = 0
     $monkeyProps = if ($monkeys -is [hashtable]) { $monkeys.Keys } else { $monkeys.PSObject.Properties.Name }
@@ -458,6 +505,7 @@ function Show-RunCheckpointSummary {
         $mData = if ($monkeys -is [hashtable]) { $monkeys[$mId] } else { $monkeys.$mId }
         switch ($mData.status) {
             'complete'    { $completedCount++ }
+            'skipped'     { $skippedCount++ }
             'in-progress' { $inProgressCount++ }
             default       { $pendingCount++ }
         }
@@ -475,6 +523,9 @@ function Show-RunCheckpointSummary {
     Write-Host ""
     Write-Host "  Progress:" -ForegroundColor White
     Write-Host "    ✅ Completed:   $completedCount" -ForegroundColor Green
+    if ($skippedCount -gt 0) {
+        Write-Host "    ⏭️ Skipped:     $skippedCount" -ForegroundColor DarkYellow
+    }
     Write-Host "    🔄 In-progress: $inProgressCount (will be re-run)" -ForegroundColor Yellow
     Write-Host "    ⏳ Pending:     $pendingCount" -ForegroundColor DarkGray
     Write-Host ""
@@ -484,6 +535,7 @@ function Show-RunCheckpointSummary {
         $mData = if ($monkeys -is [hashtable]) { $monkeys[$mId] } else { $monkeys.$mId }
         $icon = switch ($mData.status) {
             'complete'     { '✅' }
+            'skipped'      { '⏭️' }
             'in-progress'  { '🔄' }
             default        { '⏳' }
         }
@@ -502,8 +554,9 @@ function Invoke-CopilotBatch {
     <#
     .SYNOPSIS
         Sends a batch of questions to a single copilot CLI call.
-        Uses GUID-based delimiters for reliable parsing.
-        Returns per-question results array.
+        For large batches (≥20 questions): writes to file, asks Copilot to read it (smaller prompt).
+        For small batches (<20): embeds inline (simpler, no file dependency).
+        Always saves batch file for checkpointing. Uses GUID delimiters for answer parsing.
     #>
     param(
         [Parameter(Mandatory)]
@@ -515,28 +568,67 @@ function Invoke-CopilotBatch {
         [string]$SharePath,
         [int]$Retries = 2,
         [int]$BaseDelay = 30,
-        [int]$TimeoutPerQuestion = 180,
+        [int]$TimeoutPerQuestion = 60,
         [switch]$ShowVerbose
     )
 
     $batchId = [guid]::NewGuid().ToString('N').Substring(0, 8)
-    $totalTimeout = $Questions.Count * $TimeoutPerQuestion
+    $totalTimeout = [Math]::Max($Questions.Count * $TimeoutPerQuestion, 300)
+    $useFileMode = $Questions.Count -ge 20
 
-    # Build the mega-prompt with questions embedded directly
+    # ── Build question block ──
     $questionBlock = ""
     foreach ($q in $Questions) {
         $idx = $q.BatchIndex
         $ep = if ($q.EntryPoint) { " (file: $($q.EntryPoint))" } else { "" }
-        $docHealSuffix = " If relevant documentation for this topic is missing or incomplete in the repo, create or update it following existing doc patterns."
         $questionBlock += @"
 
 --- QUESTION [$batchId-$idx] ---
-$($q.Question)${ep}${docHealSuffix}
+$($q.Question)${ep}
+If relevant documentation for this topic is missing or incomplete in the repo, create or update it following existing doc patterns.
 
 "@
     }
 
-    $megaPrompt = @"
+    # ── Always write batch file (checkpoint + debugging) ──
+    $batchFilePath = $null
+    $relBatchPath = $null
+    if ($OutputPath) {
+        $batchDir = Join-Path $OutputPath "batches"
+        if (-not (Test-Path $batchDir)) { New-Item -ItemType Directory -Path $batchDir -Force | Out-Null }
+        $batchFilePath = Join-Path $batchDir "batch-${batchId}.md"
+
+        $fileContent = @"
+# Batch $batchId — $($Questions.Count) Questions
+
+Answer each question below about this codebase and update or add relevant docs.
+Before each answer, output:
+>>> ANSWER [$batchId-<N>] <<<
+After your last answer, output:
+>>> BATCH DONE [$batchId] <<<
+
+$questionBlock
+"@
+        Set-Content -Path $batchFilePath -Value $fileContent -Encoding UTF8
+        $relBatchPath = $batchFilePath.Replace($WorkingDirectory, "").TrimStart("\", "/")
+    }
+
+    # ── Build prompt — file-based for large, inline for small ──
+    if ($useFileMode -and $relBatchPath) {
+        $megaPrompt = @"
+Read the questions file at ``$relBatchPath`` and answer all $($Questions.Count) questions in it about this codebase.
+
+IMPORTANT formatting rules:
+- Before each answer, output exactly: >>> ANSWER [$batchId-N] <<< (where N is the question number)
+- After your last answer, output: >>> BATCH DONE [$batchId] <<<
+- Answer each question AND update or add relevant docs in the repo following existing doc patterns.
+
+Start now — read the file, answer all questions, and create or update documentation.
+"@
+        $modeLabel = "file"
+    }
+    else {
+        $megaPrompt = @"
 You have $($Questions.Count) questions to answer about this codebase. Answer each one in order.
 
 IMPORTANT: Before each answer, output exactly this marker on its own line:
@@ -548,8 +640,11 @@ Here are the questions:
 $questionBlock
 Remember: Start each answer with >>> ANSWER [$batchId-<N>] <<< and end with >>> BATCH DONE [$batchId] <<<
 "@
+        $modeLabel = "inline"
+    }
 
-    Write-Step "Batch ${batchId}: $($Questions.Count) questions, timeout ${totalTimeout}s" "INFO"
+    $fileLabel = if ($batchFilePath) { " → batch-${batchId}.md" } else { "" }
+    Write-Step "Batch ${batchId}: $($Questions.Count) questions ($modeLabel)${fileLabel}, timeout ${totalTimeout}s" "INFO"
 
     $result = Invoke-CopilotWithRetry `
         -Prompt $megaPrompt `
@@ -561,24 +656,53 @@ Remember: Start each answer with >>> ANSWER [$batchId-<N>] <<< and end with >>> 
         -Timeout $totalTimeout `
         -ShowVerbose:$ShowVerbose
 
-    # Parse results — even partial output is valuable
-    $questionResults = @()
+    # ── If file mode failed (0 answers parsed), retry with inline fallback ──
     $rawOutput = if ($result.Success) { $result.Output } else { $result.Output }
     $batchComplete = $rawOutput -match ">>> BATCH DONE \[$batchId\] <<<"
 
+    # Quick check: did file mode produce any answers?
+    $hasAnyAnswer = $rawOutput -match ">>> ANSWER \[$batchId-"
+    if ($useFileMode -and -not $hasAnyAnswer -and $relBatchPath) {
+        Write-Step "File mode got no answers — retrying inline" "WARN"
+        $fallbackPrompt = @"
+You have $($Questions.Count) questions to answer about this codebase. Answer each one in order.
+
+IMPORTANT: Before each answer, output exactly this marker on its own line:
+>>> ANSWER [$batchId-<N>] <<<
+where <N> is the question number shown below. After your last answer, output:
+>>> BATCH DONE [$batchId] <<<
+
+Here are the questions:
+$questionBlock
+Remember: Start each answer with >>> ANSWER [$batchId-<N>] <<< and end with >>> BATCH DONE [$batchId] <<<
+"@
+        $result = Invoke-CopilotWithRetry `
+            -Prompt $fallbackPrompt `
+            -ModelName $ModelName `
+            -SharePath $SharePath `
+            -WorkingDirectory $WorkingDirectory `
+            -Retries $Retries `
+            -BaseDelay $BaseDelay `
+            -Timeout $totalTimeout `
+            -ShowVerbose:$ShowVerbose
+
+        $rawOutput = if ($result.Success) { $result.Output } else { $result.Output }
+        $batchComplete = $rawOutput -match ">>> BATCH DONE \[$batchId\] <<<"
+    }
+
+    # ── Parse results ──
+    $questionResults = @()
     foreach ($q in $Questions) {
         $idx = $q.BatchIndex
         $startMarker = ">>> ANSWER \[$batchId-$idx\] <<<"
         $nextIdx = $idx + 1
         $endMarker = ">>> ANSWER \[$batchId-$nextIdx\] <<<"
 
-        # Try to extract this question's answer
         $answer = $null
         if ($rawOutput -match "(?s)$startMarker(.+?)(?:$endMarker|>>> BATCH DONE)") {
             $answer = $Matches[1].Trim()
         }
         elseif ($rawOutput -match "(?s)$startMarker(.+)$") {
-            # Last question or truncated — grab everything after marker
             $answer = $Matches[1] -replace ">>> BATCH DONE.*$", "" | ForEach-Object { $_.Trim() }
         }
 
@@ -603,6 +727,10 @@ Remember: Start each answer with >>> ANSWER [$batchId-<N>] <<< and end with >>> 
         switch ($batchStatus) { "COMPLETE" { "OK" } "PARTIAL" { "WARN" } "FAILED" { "ERROR" } }
     )
 
+    if ($batchStatus -eq "COMPLETE" -and $batchFilePath) {
+        Remove-Item $batchFilePath -ErrorAction SilentlyContinue
+    }
+
     return @{
         BatchId         = $batchId
         Status          = $batchStatus
@@ -610,6 +738,7 @@ Remember: Start each answer with >>> ANSWER [$batchId-<N>] <<< and end with >>> 
         RawOutput       = $rawOutput
         Retries         = $result.Retries
         BatchComplete   = $batchComplete
+        BatchFile       = $batchFilePath
     }
 }
 
@@ -1190,7 +1319,8 @@ function Invoke-MonkeyQuestions {
         Shared Phase 4: feeds questions to copilot, tracks doc refs + file changes per answer.
         Supports batch mode (multiple questions per CLI call) with automatic fallback to single mode.
     .PARAMETER BatchSize
-        Number of questions per batch. Default 5. Set to 0 or 1 for legacy single-question mode.
+        Number of questions per batch. Default 50. Set to 0 or 1 for legacy single-question mode.
+        Higher values (50-100) reduce API calls but may hit output length limits.
     #>
     param(
         [array]$Questions,
@@ -1201,7 +1331,8 @@ function Invoke-MonkeyQuestions {
         [int]$MaxRetries = 3,
         [int]$RetryBaseDelay = 30,
         [int]$CallTimeout = 300,
-        [int]$BatchSize = 5,
+        [int]$BatchSize = 50,
+        [int]$MaxQuestions = 0,
         [switch]$ShowVerbose
     )
 
@@ -1245,6 +1376,40 @@ function Invoke-MonkeyQuestions {
     if ($totalQ -eq 0) {
         Write-Step "All questions already completed (checkpoint)" "OK"
         return $stats
+    }
+
+    # ── f07: Simple question dedup — remove near-duplicate questions ──
+    $seen = @{}
+    $deduped = @()
+    foreach ($q in $Questions) {
+        $key = ($q.Question -replace '[^\w\s]', '' -split '\s+' | Sort-Object) -join ' '
+        $shortKey = $key.Substring(0, [Math]::Min($key.Length, 100))
+        if (-not $seen.ContainsKey($shortKey)) {
+            $seen[$shortKey] = $true
+            $deduped += $q
+        }
+    }
+    if ($deduped.Count -lt $Questions.Count) {
+        Write-Step "Dedup: removed $($Questions.Count - $deduped.Count) near-duplicate questions" "INFO"
+        $Questions = $deduped
+        $totalQ = $Questions.Count
+    }
+
+    # ── f03: Cap questions if MaxQuestions is set ──
+    if ($MaxQuestions -gt 0 -and $totalQ -gt $MaxQuestions) {
+        Write-Step "Capping questions from $totalQ to $MaxQuestions (MaxQuestions limit)" "WARN"
+        $Questions = @($Questions | Select-Object -First $MaxQuestions)
+        $totalQ = $MaxQuestions
+    }
+
+    # ── f06: Show ETA estimate ──
+    if ($useBatch) {
+        $batchCount = [Math]::Ceiling($totalQ / $BatchSize)
+        $estMinutes = [Math]::Ceiling($batchCount * 1.5)  # ~90s per batch average
+        Write-Step "Estimated: $batchCount batches, ~${estMinutes} min" "INFO"
+    } else {
+        $estMinutes = [Math]::Ceiling($totalQ * 0.75)  # ~45s per question average
+        Write-Step "Estimated: ~${estMinutes} min for $totalQ questions" "INFO"
     }
 
     New-Item -ItemType Directory -Path (Join-Path $OutputPath "session-logs") -Force | Out-Null
@@ -1797,7 +1962,8 @@ function Get-ArmyConfig {
         [string]$GeorgeDiscoveryMode,
         # ── Behavior ──
         [switch]$NonInteractive,
-        [int]$BatchSize = 5
+        [int]$BatchSize = 50,
+        [int]$MaxQuestions = 500
     )
 
     $config = @{}
@@ -1949,7 +2115,9 @@ function Get-ArmyConfig {
     }
     $config.UseBaseBranch = [bool]$UseBaseBranch
     $config.BranchName = $BranchName
-    Write-Step "Branch: $(if ($UseBaseBranch) { $config.BaseBranch } else { $BranchName })" "OK"
+    $branchLabel = if ($UseBaseBranch) { $config.BaseBranch } else { $BranchName }
+    $branchNote = if (-not $UseBaseBranch -and -not $PSBoundParameters.ContainsKey('BranchName') -and $NonInteractive) { " (tentative — checkpoint may override)" } else { "" }
+    Write-Step "Branch: $branchLabel$branchNote" "OK"
 
     # Q5: Commit mode
     if (-not $CommitMode) {
@@ -2057,9 +2225,12 @@ function Get-ArmyConfig {
         else { $config.QuestionsPerFile = 5 }
 
         # BatchSize
-        $config.BatchSize = if ($BatchSize -gt 0) { $BatchSize } else { 5 }
+        $config.BatchSize = if ($BatchSize -gt 0) { $BatchSize } else { 50 }
 
-        Write-Step "Tuning: Rafiki=$($config.QuestionsPerEntry)/entry, Abu=$($config.QuestionsPerGap)/gap, Mojo=$($config.QuestionsPerFile)/file, Batch=$($config.BatchSize)" "OK"
+        # MaxQuestions cap
+        $config.MaxQuestions = if ($MaxQuestions -gt 0) { $MaxQuestions } else { 500 }
+
+        Write-Step "Tuning: Rafiki=$($config.QuestionsPerEntry)/entry, Abu=$($config.QuestionsPerGap)/gap, Mojo=$($config.QuestionsPerFile)/file, Batch=$($config.BatchSize), MaxQ=$($config.MaxQuestions)" "OK"
     }
 
     # ═══════════════════════════════════════════
@@ -2230,6 +2401,8 @@ Export-ModuleMember -Function @(
     'Get-QuestionId'
     'Get-BatchCheckpoint'
     'Save-BatchCheckpoint'
+    'Save-QuestionCheckpoint'
+    'Get-QuestionCheckpoint'
     'Get-RunCheckpoint'
     'Get-RunCheckpointPath'
     'Save-RunCheckpoint'

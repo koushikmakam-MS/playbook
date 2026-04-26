@@ -71,7 +71,8 @@ param(
     [switch]$ShowVerbose,
     [switch]$ForcePlaybook,      # Re-run playbook even if knowledge layer exists
     [string[]]$TargetAgents,     # AI agents to score for (copilot, cursor, claude, etc.)
-    [int]$BatchSize = 5,         # Questions per batch (0 = single mode)
+    [int]$BatchSize = 50,        # Questions per answer batch (default 50, 0 = single mode)
+    [int]$MaxQuestions = 500,     # Cap total questions per monkey (0 = no cap)
     [switch]$Incremental,        # Only process changed files
     [string]$Since,              # Git ref or date for incremental mode
     [switch]$Resume,             # Resume from last checkpoint
@@ -200,13 +201,18 @@ if ($earlyRepoPath -and -not $CleanStart) {
             $cpModel = $earlyCp.model
             $cpPack = $earlyCp.pack
 
-            # Count monkey statuses
+            # Count monkey statuses (f05: separate completed vs skipped)
             $cpMonkeys = if ($earlyCp.monkeys -is [hashtable]) { $earlyCp.monkeys } else { $earlyCp.monkeys }
             $mProps = if ($cpMonkeys -is [hashtable]) { $cpMonkeys.Keys } else { $cpMonkeys.PSObject.Properties.Name }
             $completedCount = @($mProps | Where-Object {
                 $s = if ($cpMonkeys -is [hashtable]) { $cpMonkeys[$_].status } else { $cpMonkeys.$_.status }
-                $s -in @('complete', 'skipped')
+                $s -eq 'complete'
             }).Count
+            $skippedCount = @($mProps | Where-Object {
+                $s = if ($cpMonkeys -is [hashtable]) { $cpMonkeys[$_].status } else { $cpMonkeys.$_.status }
+                $s -eq 'skipped'
+            }).Count
+            $doneCount = $completedCount + $skippedCount
             $totalCount = $mProps.Count
 
             Write-Host ""
@@ -216,7 +222,8 @@ if ($earlyRepoPath -and -not $CleanStart) {
             Write-Host "  Branch:  $cpBranch" -ForegroundColor DarkGray
             Write-Host "  Model:   $cpModel" -ForegroundColor DarkGray
             Write-Host "  Pack:    $cpPack" -ForegroundColor DarkGray
-            Write-Host "  Progress: $completedCount/$totalCount monkeys done" -ForegroundColor DarkGray
+            Write-Host "  Progress: $doneCount/$totalCount done ($completedCount completed, $skippedCount skipped)" -ForegroundColor DarkGray
+            Write-Host "  Tip: Use -Resume to continue from where you left off" -ForegroundColor DarkGray
             Write-Host ""
 
             $useCheckpoint = $false
@@ -236,7 +243,7 @@ if ($earlyRepoPath -and -not $CleanStart) {
                 # Override branch to match checkpoint
                 $config['BranchName'] = $cpBranch
                 if (-not $Resume) { $Resume = $true }
-                Write-Step "Will resume on branch: $cpBranch" "OK"
+                Write-Step "Branch (checkpoint): $cpBranch" "OK"
             }
         }
         catch {
@@ -498,6 +505,11 @@ foreach ($monkey in $config.OrderedMonkeys) {
     # BatchSize is common to all prompt-mode monkeys
     if ($BatchSize -and $monkeyId -notin @('playbook', 'curious-george')) {
         $monkeyParams.BatchSize = $BatchSize
+    }
+
+    # MaxQuestions cap is common to all prompt-mode monkeys
+    if ($config.MaxQuestions -and $monkeyId -notin @('playbook', 'curious-george')) {
+        $monkeyParams.MaxQuestions = $config.MaxQuestions
     }
 
     # Incremental mode is common to all prompt-mode monkeys
