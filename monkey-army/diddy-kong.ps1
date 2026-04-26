@@ -40,6 +40,9 @@
 .PARAMETER QuestionsPerFinding
     Number of questions per architectural finding. Default 3.
 
+.PARAMETER FindingBatchSize
+    Number of findings to batch per Copilot call during question generation. Default 10.
+
 .PARAMETER DryRun
     Stage changes only, don't commit.
 
@@ -80,6 +83,7 @@ param(
     [int]$RetryBaseDelay = 30,
     [int]$CallTimeout = 300,
     [int]$BatchSize = 5,
+    [int]$FindingBatchSize = 10,
     [int]$MaxQuestions = 0,
 
     [switch]$Incremental,
@@ -429,27 +433,81 @@ function Invoke-ArchAnalysis {
 function New-ArchQuestions {
     <#
     .SYNOPSIS
-        For each architectural finding, asks copilot to generate targeted questions
+        For batches of architectural findings, asks copilot to generate targeted questions
         about component boundaries and dependency rules.
+    .DESCRIPTION
+        Batches multiple findings per Copilot call (default 10) for faster question generation.
+        Falls back to per-finding generation if a batch call fails.
     #>
     param(
         [array]$Findings,
-        [string]$WorkingDirectory
+        [string]$WorkingDirectory,
+        [int]$BatchSize = 10
     )
 
-    Write-Phase "PHASE 3" "Question Generation — $($Findings.Count) findings"
+    Write-Phase "PHASE 3" "Question Generation — $($Findings.Count) findings (batch size $BatchSize)"
 
     $allQuestions   = @()
     $questionHashes = @{}
-    $totalFindings  = $Findings.Count
-    $currentF       = 0
 
-    foreach ($finding in $Findings) {
-        $currentF++
-        $pct = [Math]::Round(($currentF / $totalFindings) * 100)
-        Write-Progress -Activity "Generating architecture questions" -Status "$currentF/$totalFindings — $($finding.Type)" -PercentComplete $pct
+    # ── Helper: parse questions from copilot output ──
+    function Parse-QuestionsFromOutput {
+        param([string]$RawOutput)
+        $questions = @()
+        try {
+            $output = $RawOutput.Trim()
+            if ($output -match '```(?:json)?\s*\n?([\s\S]*?)\n?\s*```') {
+                $output = $Matches[1].Trim()
+            }
+            if ($output -match '\[[\s\S]*\]') {
+                $jsonMatch = $Matches[0]
+                $questions = @($jsonMatch | ConvertFrom-Json)
+            }
+        }
+        catch {
+            $questions = @()
+            $lines = $RawOutput -split "`n"
+            foreach ($line in $lines) {
+                if ($line -match '^\s*\d+[\.\)]\s*(.+)') {
+                    $questions += $Matches[1].Trim()
+                }
+            }
+        }
+        return ,$questions
+    }
 
-        $typeLabel = switch ($finding.Type) {
+    # ── Helper: dedup and add questions to allQuestions ──
+    function Add-DedupedQuestions {
+        param([array]$Questions, [string]$EntryPoint, [string]$Category)
+        $added = 0
+        foreach ($q in $Questions) {
+            $hash = [System.BitConverter]::ToString(
+                [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+                    [System.Text.Encoding]::UTF8.GetBytes($q.ToLower().Trim())
+                )
+            ).Substring(0, 16)
+
+            if (-not $questionHashes.ContainsKey($hash)) {
+                $questionHashes[$hash] = $true
+                $allQuestions += @{
+                    EntryPoint = $EntryPoint
+                    Question   = $q
+                    Category   = $Category
+                }
+                $added++
+            }
+        }
+        # Propagate allQuestions back to parent scope
+        Set-Variable -Name allQuestions -Value $allQuestions -Scope 1
+        Set-Variable -Name questionHashes -Value $questionHashes -Scope 1
+        return $added
+    }
+
+    # ── Helper: generate questions for a single finding (fallback) ──
+    function Invoke-SingleFindingGeneration {
+        param($Finding)
+
+        $typeLabel = switch ($Finding.Type) {
             "CIRCULAR_DEPENDENCY" { "a circular dependency" }
             "ORPHAN_MODULE"       { "an orphan module (never imported)" }
             "HUB_MODULE"          { "a hub module with high coupling" }
@@ -457,11 +515,11 @@ function New-ArchQuestions {
             default               { "an architectural issue" }
         }
 
-        $filesStr = $finding.Files -join ", "
+        $filesStr = $Finding.Files -join ", "
         $genPrompt = @"
 I found $typeLabel in this codebase.
 Files involved: $filesStr
-Details: $($finding.Detail)
+Details: $($Finding.Detail)
 
 Generate exactly $QuestionsPerFinding targeted questions about this architectural concern.
 Questions should trigger documentation of:
@@ -476,45 +534,121 @@ Output ONLY a JSON array of strings. No explanation, no markdown fences.
 Example: ["What are the component boundaries between ModuleA and ModuleB, and why does the circular dependency exist?"]
 "@
 
-        Write-Step "[$currentF/$totalFindings] Generating $QuestionsPerFinding questions for $($finding.Type) in $filesStr..." "INFO"
+        $result = Invoke-CopilotWithRetry -Prompt $genPrompt -ModelName $script:SelectedModel `
+            -WorkingDirectory $WorkingDirectory -Retries $MaxRetries `
+            -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
+
+        if (-not $result.Success) {
+            Write-Step "  Fallback failed for $($Finding.Type): $($result.Error)" "ERROR"
+            return
+        }
+
+        $questions = Parse-QuestionsFromOutput -RawOutput $result.Output
+        if ($questions.Count -eq 0) {
+            Write-Step "  No questions parsed for fallback $($Finding.Type)" "WARN"
+            return
+        }
+
+        $entryPoint = ($Finding.Files | Select-Object -First 1)
+        $added = Add-DedupedQuestions -Questions $questions -EntryPoint $entryPoint -Category $Finding.Type
+        Write-Step "  Fallback: +$added questions from $($Finding.Type)" "OK"
+    }
+
+    # ── Chunk findings into batches ──
+    $batches = @()
+    for ($i = 0; $i -lt $Findings.Count; $i += $BatchSize) {
+        $end = [Math]::Min($i + $BatchSize, $Findings.Count)
+        $batches += ,@($Findings[$i..($end - 1)])
+    }
+
+    $totalBatches = $batches.Count
+    $batchNum = 0
+    $earlyExit = $false
+
+    foreach ($batch in $batches) {
+        $batchNum++
+        $pct = [Math]::Round(($batchNum / $totalBatches) * 100)
+        Write-Progress -Activity "Generating architecture questions" -Status "Batch $batchNum/$totalBatches ($($batch.Count) findings)" -PercentComplete $pct
+
+        # Build multi-finding prompt
+        $findingsBlock = ""
+        $fIdx = 0
+        foreach ($f in $batch) {
+            $fIdx++
+            $typeLabel = switch ($f.Type) {
+                "CIRCULAR_DEPENDENCY" { "Circular dependency" }
+                "ORPHAN_MODULE"       { "Orphan module (never imported)" }
+                "HUB_MODULE"          { "Hub module with high coupling" }
+                "LAYER_VIOLATION"     { "Layer violation" }
+                default               { "Architectural issue" }
+            }
+            $findingsBlock += "Finding $fIdx`: $typeLabel — $($f.Detail)`nFiles: $($f.Files -join ', ')`n`n"
+        }
+
+        $totalExpected = $batch.Count * $QuestionsPerFinding
+        $genPrompt = @"
+I found $($batch.Count) architectural issues in this codebase:
+
+$findingsBlock
+
+For EACH finding, generate exactly $QuestionsPerFinding targeted questions about the architectural concern.
+Questions should trigger documentation of:
+- Component boundaries and responsibilities
+- Dependency rules and allowed/disallowed imports
+- Refactoring strategies to resolve the issue
+- Impact analysis if this issue is left unresolved
+
+Each question must be specific to the actual files and patterns found.
+Output ONLY a JSON array of strings (all questions for all findings combined, $totalExpected total). No explanation, no markdown fences.
+"@
+
+        Write-Step "[Batch $batchNum/$totalBatches] Generating questions for $($batch.Count) findings..." "INFO"
 
         $result = Invoke-CopilotWithRetry -Prompt $genPrompt -ModelName $script:SelectedModel `
             -WorkingDirectory $WorkingDirectory -Retries $MaxRetries `
             -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
 
         if (-not $result.Success) {
-            Write-Step "Failed to generate questions for $($finding.Type): $($result.Error)" "ERROR"
-            continue
-        }
-
-        $questions = @()
-        try {
-            $output = $result.Output.Trim()
-            if ($output -match '```(?:json)?\s*\n?([\s\S]*?)\n?\s*```') {
-                $output = $Matches[1].Trim()
-            }
-            if ($output -match '\[[\s\S]*\]') {
-                $jsonMatch = $Matches[0]
-                $questions = @($jsonMatch | ConvertFrom-Json)
-            }
-        }
-        catch {
-            Write-Step "JSON parse failed for $($finding.Type). Falling back to line parsing." "WARN"
-            $questions = @()
-            $lines = $result.Output -split "`n"
-            foreach ($line in $lines) {
-                if ($line -match '^\s*\d+[\.\)]\s*(.+)') {
-                    $questions += $Matches[1].Trim()
+            Write-Step "[Batch $batchNum] Batch call failed: $($result.Error) — falling back to per-finding" "WARN"
+            foreach ($f in $batch) {
+                Invoke-SingleFindingGeneration -Finding $f
+                if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
+                    $earlyExit = $true
+                    break
                 }
             }
-        }
-
-        if ($questions.Count -eq 0) {
-            Write-Step "No questions parsed for $($finding.Type)" "WARN"
+            if ($earlyExit) {
+                Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
+                break
+            }
             continue
         }
 
-        foreach ($q in $questions) {
+        $questions = Parse-QuestionsFromOutput -RawOutput $result.Output
+        if ($questions.Count -eq 0) {
+            Write-Step "[Batch $batchNum] No questions parsed from batch — falling back to per-finding" "WARN"
+            foreach ($f in $batch) {
+                Invoke-SingleFindingGeneration -Finding $f
+                if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
+                    $earlyExit = $true
+                    break
+                }
+            }
+            if ($earlyExit) {
+                Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
+                break
+            }
+            continue
+        }
+
+        # Distribute questions across findings proportionally by round-robin assignment
+        $qPerFinding = $QuestionsPerFinding
+        for ($qi = 0; $qi -lt $questions.Count; $qi++) {
+            $findingIdx = [Math]::Min([Math]::Floor($qi / $qPerFinding), $batch.Count - 1)
+            $f = $batch[$findingIdx]
+            $entryPoint = ($f.Files | Select-Object -First 1)
+
+            $q = $questions[$qi]
             $hash = [System.BitConverter]::ToString(
                 [System.Security.Cryptography.SHA256]::Create().ComputeHash(
                     [System.Text.Encoding]::UTF8.GetBytes($q.ToLower().Trim())
@@ -524,14 +658,14 @@ Example: ["What are the component boundaries between ModuleA and ModuleB, and wh
             if (-not $questionHashes.ContainsKey($hash)) {
                 $questionHashes[$hash] = $true
                 $allQuestions += @{
-                    EntryPoint = ($finding.Files | Select-Object -First 1)
+                    EntryPoint = $entryPoint
                     Question   = $q
-                    Category   = $finding.Type
+                    Category   = $f.Type
                 }
             }
         }
 
-        Write-Step "Generated $($questions.Count) unique questions ($($allQuestions.Count) total)" "OK"
+        Write-Step "[Batch $batchNum] +$($questions.Count) questions ($($allQuestions.Count) total)" "OK"
 
         # Early exit if MaxQuestions cap reached
         if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
@@ -631,7 +765,7 @@ function Start-DiddyKong {
         }
 
         # Phase 3: Question generation
-        $questions = New-ArchQuestions -Findings $findings -WorkingDirectory $workDir
+        $questions = New-ArchQuestions -Findings $findings -WorkingDirectory $workDir -BatchSize $FindingBatchSize
 
         if ($questions.Count -eq 0) {
             Write-Step "No questions generated. Check findings." "WARN"

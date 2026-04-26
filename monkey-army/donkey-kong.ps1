@@ -36,6 +36,7 @@ param(
     [int]$RetryBaseDelay = 30,
     [int]$CallTimeout = 300,
     [int]$BatchSize = 5,
+    [int]$GapBatchSize = 10,
     [int]$MaxQuestions = 0,
 
     [switch]$Incremental,
@@ -221,60 +222,290 @@ function Find-CoverageGaps {
 # ── Phase 3 — Question Generation ────────────────────────────────────
 
 function New-CoverageQuestions {
-    param([hashtable]$Findings, [string]$WorkingDirectory)
+    param(
+        [hashtable]$Findings,
+        [string]$WorkingDirectory,
+        [int]$GapBatchSize = 10
+    )
     $totalGaps = $Findings.Untested.Count + $Findings.UnderTested.Count + $Findings.TestlessDirs.Count
-    Write-Phase "PHASE 3" "Question Generation — $totalGaps coverage gaps"
+    Write-Phase "PHASE 3" "Question Generation — $totalGaps coverage gaps (batch size $GapBatchSize)"
     if ($totalGaps -eq 0) { Write-Step "No coverage gaps found! 🎉" "OK"; return @() }
 
-    $allQuestions = @(); $questionHashes = @{}; $currentGap = 0
+    $allQuestions = @(); $questionHashes = @{}
 
-    foreach ($gap in $Findings.Untested) {
-        $currentGap++
-        Write-Progress -Activity "Generating coverage questions" -Status "$currentGap/$totalGaps — $($gap.SourceFile)" -PercentComplete ([Math]::Round(($currentGap/$totalGaps)*100))
-        $prompt = "Source file '$($gap.SourceFile)' has $($gap.PublicMethods) public methods but NO test file exists for it.`n`nGenerate exactly $QuestionsPerFile questions about test coverage gaps that would trigger documentation of testing strategy and required test cases. Focus on: what test cases are needed, edge cases/error paths, and mocking strategy.`n`nOutput ONLY a JSON array of strings. No explanation, no markdown fences."
-        Write-Step "[$currentGap/$totalGaps] Untested: $($gap.SourceFile) ($($gap.PublicMethods) methods)..." "INFO"
-        $result = Invoke-CopilotWithRetry -Prompt $prompt -ModelName $script:SelectedModel -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
-        foreach ($q in (ConvertFrom-CopilotQuestionResponse -Result $result -Label $gap.SourceFile)) {
-            $hash = Get-QuestionHash -Text $q
-            if (-not $questionHashes.ContainsKey($hash)) { $questionHashes[$hash] = $true; $allQuestions += @{ EntryPoint=$gap.SourceFile; Question=$q; Category="UNTESTED" } }
+    # ── Helper: parse questions from copilot output ──
+    function Parse-QuestionsFromOutput {
+        param([string]$RawOutput)
+        $questions = @()
+        try {
+            $output = $RawOutput.Trim()
+            if ($output -match '```(?:json)?\s*\n?([\s\S]*?)\n?\s*```') { $output = $Matches[1].Trim() }
+            if ($output -match '\[[\s\S]*\]') { $questions = @($Matches[0] | ConvertFrom-Json) }
         }
-        if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
-            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
-            break
+        catch {
+            $questions = @()
+            foreach ($line in ($RawOutput -split "`n")) {
+                if ($line -match '^\s*\d+[\.\)]\s*(.+)') { $questions += $Matches[1].Trim() }
+            }
+        }
+        return ,$questions
+    }
+
+    # ── Helper: dedup and add questions ──
+    function Add-DedupedQuestions {
+        param([array]$Questions, [string]$EntryPoint, [string]$Category)
+        $added = 0
+        foreach ($q in $Questions) {
+            $hash = Get-QuestionHash -Text $q
+            if (-not $questionHashes.ContainsKey($hash)) {
+                $questionHashes[$hash] = $true
+                $allQuestions += @{ EntryPoint=$EntryPoint; Question=$q; Category=$Category }
+                $added++
+            }
+        }
+        Set-Variable -Name allQuestions -Value $allQuestions -Scope 1
+        Set-Variable -Name questionHashes -Value $questionHashes -Scope 1
+        return $added
+    }
+
+    # ── Helper: single-item fallback for untested ──
+    function Invoke-SingleUntested {
+        param($Gap)
+        $prompt = "Source file '$($Gap.SourceFile)' has $($Gap.PublicMethods) public methods but NO test file exists for it.`n`nGenerate exactly $QuestionsPerFile questions about test coverage gaps that would trigger documentation of testing strategy and required test cases. Focus on: what test cases are needed, edge cases/error paths, and mocking strategy.`n`nOutput ONLY a JSON array of strings. No explanation, no markdown fences."
+        $result = Invoke-CopilotWithRetry -Prompt $prompt -ModelName $script:SelectedModel -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
+        if ($result -and $result.Success) {
+            $qs = Parse-QuestionsFromOutput -RawOutput $result.Output
+            Add-DedupedQuestions -Questions $qs -EntryPoint $Gap.SourceFile -Category "UNTESTED" | Out-Null
         }
     }
 
-    foreach ($gap in $Findings.UnderTested) {
-        $currentGap++
-        Write-Progress -Activity "Generating coverage questions" -Status "$currentGap/$totalGaps — $($gap.SourceFile)" -PercentComplete ([Math]::Round(($currentGap/$totalGaps)*100))
+    # ── Helper: single-item fallback for under-tested ──
+    function Invoke-SingleUnderTested {
+        param($Gap)
         $qCount = [Math]::Min(2, $QuestionsPerFile)
-        $prompt = "Test file '$($gap.TestFile)' for source '$($gap.SourceFile)' has only $($gap.TestMethods) test methods for $($gap.PublicMethods) public methods.`n`nGenerate exactly $qCount questions about missing test coverage. Focus on which public methods lack coverage and what additional scenarios should be tested.`n`nOutput ONLY a JSON array of strings. No explanation, no markdown fences."
-        Write-Step "[$currentGap/$totalGaps] Under-tested: $($gap.SourceFile) ($($gap.TestMethods)/$($gap.PublicMethods))..." "INFO"
+        $prompt = "Test file '$($Gap.TestFile)' for source '$($Gap.SourceFile)' has only $($Gap.TestMethods) test methods for $($Gap.PublicMethods) public methods.`n`nGenerate exactly $qCount questions about missing test coverage. Focus on which public methods lack coverage and what additional scenarios should be tested.`n`nOutput ONLY a JSON array of strings. No explanation, no markdown fences."
         $result = Invoke-CopilotWithRetry -Prompt $prompt -ModelName $script:SelectedModel -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
-        foreach ($q in (ConvertFrom-CopilotQuestionResponse -Result $result -Label $gap.SourceFile)) {
-            $hash = Get-QuestionHash -Text $q
-            if (-not $questionHashes.ContainsKey($hash)) { $questionHashes[$hash] = $true; $allQuestions += @{ EntryPoint=$gap.SourceFile; Question=$q; Category="UNDER_TESTED" } }
-        }
-        if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
-            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
-            break
+        if ($result -and $result.Success) {
+            $qs = Parse-QuestionsFromOutput -RawOutput $result.Output
+            Add-DedupedQuestions -Questions $qs -EntryPoint $Gap.SourceFile -Category "UNDER_TESTED" | Out-Null
         }
     }
 
-    foreach ($gap in $Findings.TestlessDirs) {
-        $currentGap++
-        Write-Progress -Activity "Generating coverage questions" -Status "$currentGap/$totalGaps — $($gap.Directory)" -PercentComplete ([Math]::Round(($currentGap/$totalGaps)*100))
+    # ── Helper: single-item fallback for testless dirs ──
+    function Invoke-SingleTestlessDir {
+        param($Gap)
         $qCount = [Math]::Min(2, $QuestionsPerFile)
-        $prompt = "Directory '$($gap.Directory)' has $($gap.SourceCount) source files but no test directory or test files nearby.`n`nGenerate exactly $qCount questions about testing strategy for this module. Focus on appropriate testing approach and required test infrastructure.`n`nOutput ONLY a JSON array of strings. No explanation, no markdown fences."
-        Write-Step "[$currentGap/$totalGaps] Test-less dir: $($gap.Directory) ($($gap.SourceCount) files)..." "INFO"
+        $prompt = "Directory '$($Gap.Directory)' has $($Gap.SourceCount) source files but no test directory or test files nearby.`n`nGenerate exactly $qCount questions about testing strategy for this module. Focus on appropriate testing approach and required test infrastructure.`n`nOutput ONLY a JSON array of strings. No explanation, no markdown fences."
         $result = Invoke-CopilotWithRetry -Prompt $prompt -ModelName $script:SelectedModel -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
-        foreach ($q in (ConvertFrom-CopilotQuestionResponse -Result $result -Label $gap.Directory)) {
-            $hash = Get-QuestionHash -Text $q
-            if (-not $questionHashes.ContainsKey($hash)) { $questionHashes[$hash] = $true; $allQuestions += @{ EntryPoint=$gap.Directory; Question=$q; Category="TESTLESS_DIR" } }
+        if ($result -and $result.Success) {
+            $qs = Parse-QuestionsFromOutput -RawOutput $result.Output
+            Add-DedupedQuestions -Questions $qs -EntryPoint $Gap.Directory -Category "TESTLESS_DIR" | Out-Null
         }
+    }
+
+    # ── Process batches for each gap type ──
+    $earlyExit = $false
+
+    # ── 1. Untested files ──
+    $batches = @()
+    for ($i = 0; $i -lt $Findings.Untested.Count; $i += $GapBatchSize) {
+        $end = [Math]::Min($i + $GapBatchSize, $Findings.Untested.Count)
+        $batches += ,@($Findings.Untested[$i..($end - 1)])
+    }
+    $totalBatches = $batches.Count
+    $batchNum = 0
+    foreach ($batch in $batches) {
+        $batchNum++
+        Write-Progress -Activity "Generating coverage questions" -Status "Untested Batch $batchNum/$totalBatches ($($batch.Count) files)" -PercentComplete ([Math]::Round(($batchNum / [Math]::Max($totalBatches, 1)) * 100))
+
+        # Build multi-file prompt
+        $filesBlock = ""
+        $fIdx = 0
+        foreach ($g in $batch) {
+            $fIdx++
+            $filesBlock += "$fIdx. $($g.SourceFile) ($($g.PublicMethods) public methods)`n"
+        }
+        $totalExpected = $batch.Count * $QuestionsPerFile
+        $prompt = @"
+These source files have NO test files:
+$filesBlock
+For EACH file, generate exactly $QuestionsPerFile questions about test coverage gaps that would trigger documentation of testing strategy and required test cases. Focus on: what test cases are needed, edge cases/error paths, and mocking strategy.
+Output ONLY a JSON array of strings ($totalExpected total). No explanation, no markdown fences.
+"@
+        Write-Step "[Untested Batch $batchNum/$totalBatches] Generating questions for $($batch.Count) files..." "INFO"
+        $result = Invoke-CopilotWithRetry -Prompt $prompt -ModelName $script:SelectedModel -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
+
+        if (-not $result -or -not $result.Success) {
+            Write-Step "[Untested Batch $batchNum] Batch call failed — falling back to per-file" "WARN"
+            foreach ($g in $batch) {
+                Invoke-SingleUntested -Gap $g
+                if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) { $earlyExit = $true; break }
+            }
+            if ($earlyExit) { Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; break }
+            continue
+        }
+
+        $questions = Parse-QuestionsFromOutput -RawOutput $result.Output
+        if ($questions.Count -eq 0) {
+            Write-Step "[Untested Batch $batchNum] No questions parsed — falling back to per-file" "WARN"
+            foreach ($g in $batch) {
+                Invoke-SingleUntested -Gap $g
+                if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) { $earlyExit = $true; break }
+            }
+            if ($earlyExit) { Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; break }
+            continue
+        }
+
+        # Round-robin distribute questions to batch items
+        $qPerFile = $QuestionsPerFile
+        for ($qi = 0; $qi -lt $questions.Count; $qi++) {
+            $fileIdx = [Math]::Min([Math]::Floor($qi / $qPerFile), $batch.Count - 1)
+            $g = $batch[$fileIdx]
+            $hash = Get-QuestionHash -Text $questions[$qi]
+            if (-not $questionHashes.ContainsKey($hash)) {
+                $questionHashes[$hash] = $true
+                $allQuestions += @{ EntryPoint=$g.SourceFile; Question=$questions[$qi]; Category="UNTESTED" }
+            }
+        }
+        Write-Step "[Untested Batch $batchNum] +$($questions.Count) questions ($($allQuestions.Count) total)" "OK"
         if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
-            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
-            break
+            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; $earlyExit = $true; break
+        }
+    }
+
+    # ── 2. Under-tested files ──
+    if (-not $earlyExit) {
+        $batches = @()
+        for ($i = 0; $i -lt $Findings.UnderTested.Count; $i += $GapBatchSize) {
+            $end = [Math]::Min($i + $GapBatchSize, $Findings.UnderTested.Count)
+            $batches += ,@($Findings.UnderTested[$i..($end - 1)])
+        }
+        $totalBatches = $batches.Count
+        $batchNum = 0
+        foreach ($batch in $batches) {
+            $batchNum++
+            Write-Progress -Activity "Generating coverage questions" -Status "Under-tested Batch $batchNum/$totalBatches ($($batch.Count) files)" -PercentComplete ([Math]::Round(($batchNum / [Math]::Max($totalBatches, 1)) * 100))
+
+            $qCount = [Math]::Min(2, $QuestionsPerFile)
+            $filesBlock = ""
+            $fIdx = 0
+            foreach ($g in $batch) {
+                $fIdx++
+                $filesBlock += "$fIdx. $($g.SourceFile) — test file '$($g.TestFile)' has $($g.TestMethods) test methods for $($g.PublicMethods) public methods`n"
+            }
+            $totalExpected = $batch.Count * $qCount
+            $prompt = @"
+These source files have INSUFFICIENT test coverage:
+$filesBlock
+For EACH file, generate exactly $qCount questions about missing test coverage. Focus on which public methods lack coverage and what additional scenarios should be tested.
+Output ONLY a JSON array of strings ($totalExpected total). No explanation, no markdown fences.
+"@
+            Write-Step "[Under-tested Batch $batchNum/$totalBatches] Generating questions for $($batch.Count) files..." "INFO"
+            $result = Invoke-CopilotWithRetry -Prompt $prompt -ModelName $script:SelectedModel -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
+
+            if (-not $result -or -not $result.Success) {
+                Write-Step "[Under-tested Batch $batchNum] Batch call failed — falling back to per-file" "WARN"
+                foreach ($g in $batch) {
+                    Invoke-SingleUnderTested -Gap $g
+                    if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) { $earlyExit = $true; break }
+                }
+                if ($earlyExit) { Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; break }
+                continue
+            }
+
+            $questions = Parse-QuestionsFromOutput -RawOutput $result.Output
+            if ($questions.Count -eq 0) {
+                Write-Step "[Under-tested Batch $batchNum] No questions parsed — falling back to per-file" "WARN"
+                foreach ($g in $batch) {
+                    Invoke-SingleUnderTested -Gap $g
+                    if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) { $earlyExit = $true; break }
+                }
+                if ($earlyExit) { Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; break }
+                continue
+            }
+
+            # Round-robin distribute
+            for ($qi = 0; $qi -lt $questions.Count; $qi++) {
+                $fileIdx = [Math]::Min([Math]::Floor($qi / $qCount), $batch.Count - 1)
+                $g = $batch[$fileIdx]
+                $hash = Get-QuestionHash -Text $questions[$qi]
+                if (-not $questionHashes.ContainsKey($hash)) {
+                    $questionHashes[$hash] = $true
+                    $allQuestions += @{ EntryPoint=$g.SourceFile; Question=$questions[$qi]; Category="UNDER_TESTED" }
+                }
+            }
+            Write-Step "[Under-tested Batch $batchNum] +$($questions.Count) questions ($($allQuestions.Count) total)" "OK"
+            if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
+                Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; $earlyExit = $true; break
+            }
+        }
+    }
+
+    # ── 3. Testless directories ──
+    if (-not $earlyExit) {
+        $batches = @()
+        for ($i = 0; $i -lt $Findings.TestlessDirs.Count; $i += $GapBatchSize) {
+            $end = [Math]::Min($i + $GapBatchSize, $Findings.TestlessDirs.Count)
+            $batches += ,@($Findings.TestlessDirs[$i..($end - 1)])
+        }
+        $totalBatches = $batches.Count
+        $batchNum = 0
+        foreach ($batch in $batches) {
+            $batchNum++
+            Write-Progress -Activity "Generating coverage questions" -Status "Testless-dir Batch $batchNum/$totalBatches ($($batch.Count) dirs)" -PercentComplete ([Math]::Round(($batchNum / [Math]::Max($totalBatches, 1)) * 100))
+
+            $qCount = [Math]::Min(2, $QuestionsPerFile)
+            $dirsBlock = ""
+            $fIdx = 0
+            foreach ($g in $batch) {
+                $fIdx++
+                $dirsBlock += "$fIdx. $($g.Directory) ($($g.SourceCount) source files)`n"
+            }
+            $totalExpected = $batch.Count * $qCount
+            $prompt = @"
+These directories have source files but NO test directory or test files nearby:
+$dirsBlock
+For EACH directory, generate exactly $qCount questions about testing strategy for this module. Focus on appropriate testing approach and required test infrastructure.
+Output ONLY a JSON array of strings ($totalExpected total). No explanation, no markdown fences.
+"@
+            Write-Step "[Testless-dir Batch $batchNum/$totalBatches] Generating questions for $($batch.Count) dirs..." "INFO"
+            $result = Invoke-CopilotWithRetry -Prompt $prompt -ModelName $script:SelectedModel -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
+
+            if (-not $result -or -not $result.Success) {
+                Write-Step "[Testless-dir Batch $batchNum] Batch call failed — falling back to per-dir" "WARN"
+                foreach ($g in $batch) {
+                    Invoke-SingleTestlessDir -Gap $g
+                    if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) { $earlyExit = $true; break }
+                }
+                if ($earlyExit) { Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; break }
+                continue
+            }
+
+            $questions = Parse-QuestionsFromOutput -RawOutput $result.Output
+            if ($questions.Count -eq 0) {
+                Write-Step "[Testless-dir Batch $batchNum] No questions parsed — falling back to per-dir" "WARN"
+                foreach ($g in $batch) {
+                    Invoke-SingleTestlessDir -Gap $g
+                    if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) { $earlyExit = $true; break }
+                }
+                if ($earlyExit) { Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; break }
+                continue
+            }
+
+            # Round-robin distribute
+            for ($qi = 0; $qi -lt $questions.Count; $qi++) {
+                $fileIdx = [Math]::Min([Math]::Floor($qi / $qCount), $batch.Count - 1)
+                $g = $batch[$fileIdx]
+                $hash = Get-QuestionHash -Text $questions[$qi]
+                if (-not $questionHashes.ContainsKey($hash)) {
+                    $questionHashes[$hash] = $true
+                    $allQuestions += @{ EntryPoint=$g.Directory; Question=$questions[$qi]; Category="TESTLESS_DIR" }
+                }
+            }
+            Write-Step "[Testless-dir Batch $batchNum] +$($questions.Count) questions ($($allQuestions.Count) total)" "OK"
+            if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
+                Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; break
+            }
         }
     }
 
@@ -357,7 +588,7 @@ function Start-DonkeyKong {
             }
         }
         
-        $questions = New-CoverageQuestions -Findings $findings -WorkingDirectory $workDir
+        $questions = New-CoverageQuestions -Findings $findings -WorkingDirectory $workDir -GapBatchSize $GapBatchSize
 
         if ($questions.Count -eq 0) {
             $duration = (Get-Date) - $startTime

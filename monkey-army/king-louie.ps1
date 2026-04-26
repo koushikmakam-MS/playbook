@@ -67,6 +67,7 @@ param(
     [int]$RetryBaseDelay = 30,
     [int]$CallTimeout = 300,
     [int]$BatchSize = 5,
+    [int]$GapBatchSize = 10,
     [int]$MaxQuestions = 0,
 
     [switch]$Incremental,
@@ -424,98 +425,82 @@ function New-ContractQuestions {
     <#
     .SYNOPSIS
         Generates questions about API contract gaps and endpoint documentation.
+        Batches multiple gaps/endpoints per Copilot call for efficiency.
     #>
     param(
         [hashtable]$Discovery,
-        [string]$WorkingDirectory
+        [string]$WorkingDirectory,
+        [int]$GapBatchSize = 10
     )
 
-    Write-Phase "PHASE 3" "Question Generation — API Contract Gaps"
+    Write-Phase "PHASE 3" "Question Generation — API Contract Gaps (batch size $GapBatchSize)"
 
     $allQuestions = @()
     $questionHashes = @{}
-    $totalItems = $Discovery.Gaps.Count + $Discovery.CodeEndpoints.Count
-    $current = 0
 
-    # ── Gap questions: endpoints missing from spec or code ──
-    foreach ($gap in $Discovery.Gaps) {
-        $current++
-        $pct = [Math]::Round(($current / [Math]::Max($totalItems, 1)) * 100)
-        Write-Progress -Activity "Generating contract questions" -Status "$current/$totalItems" -PercentComplete $pct
+    # ── Helper: parse questions from copilot output ──
+    function Parse-QuestionsFromOutput {
+        param([string]$RawOutput)
+        $questions = @()
+        try {
+            $output = $RawOutput.Trim()
+            if ($output -match '```(?:json)?\s*\n?([\s\S]*?)\n?\s*```') { $output = $Matches[1].Trim() }
+            if ($output -match '\[[\s\S]*\]') { $questions = @($Matches[0] | ConvertFrom-Json) }
+        }
+        catch {
+            $questions = @()
+            $lines = $RawOutput -split "`n"
+            foreach ($line in $lines) {
+                if ($line -match '^\s*\d+[\.\)]\s*(.+)') { $questions += $Matches[1].Trim() }
+            }
+        }
+        return ,$questions
+    }
 
-        $direction = if ($gap.Type -eq "CODE_NOT_IN_SPEC") { "code" } else { "spec" }
-        $missing   = if ($gap.Type -eq "CODE_NOT_IN_SPEC") { "spec" } else { "code" }
+    # ── Helper: dedup hash ──
+    function Get-QHash { param([string]$Text)
+        [System.BitConverter]::ToString(
+            [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+                [System.Text.Encoding]::UTF8.GetBytes($Text.ToLower().Trim())
+            )
+        ).Substring(0, 16)
+    }
 
+    # ── Helper: single-gap fallback ──
+    function Invoke-SingleGap {
+        param($Gap)
+        $direction = if ($Gap.Type -eq "CODE_NOT_IN_SPEC") { "code" } else { "spec" }
+        $missing   = if ($Gap.Type -eq "CODE_NOT_IN_SPEC") { "spec" } else { "code" }
         $genPrompt = @"
-Endpoint [$($gap.Method) $($gap.Path)] exists in $direction (file: $($gap.File)) but not in $missing.
+Endpoint [$($Gap.Method) $($Gap.Path)] exists in $direction (file: $($Gap.File)) but not in $missing.
 This is an API contract gap.
 
 Generate exactly $QuestionsPerEndpoint questions about this API contract gap that would trigger documentation updates.
 Focus on: why this gap exists, what the correct contract should be, request/response schema, error codes, and authentication.
 
 Output ONLY a JSON array of strings. No explanation, no markdown fences.
-Example: ["What is the expected request body schema for $($gap.Method) $($gap.Path)?"]
 "@
-
-        Write-Step "[$current/$totalItems] Gap: $($gap.Method) $($gap.Path) ($($gap.Type))..." "INFO"
-
         $result = Invoke-CopilotWithRetry -Prompt $genPrompt -ModelName $script:SelectedModel `
             -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
-
         if ($result -and $result.Success) {
-            $parsed = @()
-            try {
-                $output = $result.Output.Trim()
-                if ($output -match '\[[\s\S]*\]') { $parsed = @($Matches[0] | ConvertFrom-Json) }
-            }
-            catch {
-                $lines = $result.Output -split "`n"
-                foreach ($line in $lines) {
-                    if ($line -match '^\s*\d+[\.\)]\s*(.+)') { $parsed += $Matches[1].Trim() }
-                }
-            }
-
+            $parsed = Parse-QuestionsFromOutput -RawOutput $result.Output
             foreach ($q in $parsed) {
-                $hash = [System.BitConverter]::ToString(
-                    [System.Security.Cryptography.SHA256]::Create().ComputeHash(
-                        [System.Text.Encoding]::UTF8.GetBytes($q.ToLower().Trim())
-                    )
-                ).Substring(0, 16)
-
+                $hash = Get-QHash -Text $q
                 if (-not $questionHashes.ContainsKey($hash)) {
                     $questionHashes[$hash] = $true
-                    $allQuestions += @{
-                        EntryPoint = $gap.File
-                        Question   = $q
-                        Category   = $gap.Type
-                    }
+                    $allQuestions += @{ EntryPoint = $Gap.File; Question = $q; Category = $Gap.Type }
                 }
             }
-        }
-        else {
-            Write-Step "Failed to generate gap questions for $($gap.Path)" "WARN"
-        }
-
-        # Early exit if MaxQuestions cap reached
-        if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
-            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
-            break
+            Set-Variable -Name allQuestions -Value $allQuestions -Scope 1
+            Set-Variable -Name questionHashes -Value $questionHashes -Scope 1
         }
     }
 
-    # ── Endpoint documentation questions: for each code endpoint ──
-    $endpointSample = $Discovery.CodeEndpoints
-    if ($endpointSample.Count -gt 30) {
-        $endpointSample = $endpointSample | Sort-Object { Get-Random } | Select-Object -First 30
-    }
-
-    foreach ($ep in $endpointSample) {
-        $current++
-        $pct = [Math]::Round(($current / [Math]::Max($totalItems, 1)) * 100)
-        Write-Progress -Activity "Generating contract questions" -Status "$current/$totalItems" -PercentComplete $pct
-
+    # ── Helper: single-endpoint fallback ──
+    function Invoke-SingleEndpoint {
+        param($Ep)
         $genPrompt = @"
-Endpoint [$($ep.Method) $($ep.Path)] in file $($ep.File).
+Endpoint [$($Ep.Method) $($Ep.Path)] in file $($Ep.File).
 Generate exactly 2 questions about this endpoint covering:
 - Error responses and status codes
 - Authentication/authorization requirements
@@ -523,45 +508,168 @@ Generate exactly 2 questions about this endpoint covering:
 
 Output ONLY a JSON array of strings. No explanation, no markdown fences.
 "@
+        $result = Invoke-CopilotWithRetry -Prompt $genPrompt -ModelName $script:SelectedModel `
+            -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
+        if ($result -and $result.Success) {
+            $parsed = Parse-QuestionsFromOutput -RawOutput $result.Output
+            foreach ($q in $parsed) {
+                $hash = Get-QHash -Text $q
+                if (-not $questionHashes.ContainsKey($hash)) {
+                    $questionHashes[$hash] = $true
+                    $allQuestions += @{ EntryPoint = $Ep.File; Question = $q; Category = "ENDPOINT_DOC" }
+                }
+            }
+            Set-Variable -Name allQuestions -Value $allQuestions -Scope 1
+            Set-Variable -Name questionHashes -Value $questionHashes -Scope 1
+        }
+    }
 
+    $earlyExit = $false
+
+    # ── 1. Gap questions: endpoints missing from spec or code ──
+    $batches = @()
+    for ($i = 0; $i -lt $Discovery.Gaps.Count; $i += $GapBatchSize) {
+        $end = [Math]::Min($i + $GapBatchSize, $Discovery.Gaps.Count)
+        $batches += ,@($Discovery.Gaps[$i..($end - 1)])
+    }
+    $totalBatches = $batches.Count
+    $batchNum = 0
+    foreach ($batch in $batches) {
+        $batchNum++
+        Write-Progress -Activity "Generating contract questions" -Status "Gap Batch $batchNum/$totalBatches ($($batch.Count) gaps)" -PercentComplete ([Math]::Round(($batchNum / [Math]::Max($totalBatches, 1)) * 100))
+
+        # Build multi-gap prompt
+        $gapsBlock = ""
+        $gIdx = 0
+        foreach ($g in $batch) {
+            $gIdx++
+            $direction = if ($g.Type -eq "CODE_NOT_IN_SPEC") { "code" } else { "spec" }
+            $missing   = if ($g.Type -eq "CODE_NOT_IN_SPEC") { "spec" } else { "code" }
+            $gapsBlock += "$gIdx. [$($g.Method) $($g.Path)] exists in $direction (file: $($g.File)) but not in $missing`n"
+        }
+        $totalExpected = $batch.Count * $QuestionsPerEndpoint
+        $genPrompt = @"
+These API contract gaps were found:
+$gapsBlock
+For EACH gap, generate exactly $QuestionsPerEndpoint questions about the API contract gap that would trigger documentation updates.
+Focus on: why this gap exists, what the correct contract should be, request/response schema, error codes, and authentication.
+Output ONLY a JSON array of strings ($totalExpected total). No explanation, no markdown fences.
+"@
+        Write-Step "[Gap Batch $batchNum/$totalBatches] Generating questions for $($batch.Count) gaps..." "INFO"
         $result = Invoke-CopilotWithRetry -Prompt $genPrompt -ModelName $script:SelectedModel `
             -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
 
-        if ($result -and $result.Success) {
-            $parsed = @()
-            try {
-                $output = $result.Output.Trim()
-                if ($output -match '\[[\s\S]*\]') { $parsed = @($Matches[0] | ConvertFrom-Json) }
+        if (-not $result -or -not $result.Success) {
+            Write-Step "[Gap Batch $batchNum] Batch call failed — falling back to per-gap" "WARN"
+            foreach ($g in $batch) {
+                Invoke-SingleGap -Gap $g
+                if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) { $earlyExit = $true; break }
             }
-            catch {
-                $lines = $result.Output -split "`n"
-                foreach ($line in $lines) {
-                    if ($line -match '^\s*\d+[\.\)]\s*(.+)') { $parsed += $Matches[1].Trim() }
-                }
-            }
-
-            foreach ($q in $parsed) {
-                $hash = [System.BitConverter]::ToString(
-                    [System.Security.Cryptography.SHA256]::Create().ComputeHash(
-                        [System.Text.Encoding]::UTF8.GetBytes($q.ToLower().Trim())
-                    )
-                ).Substring(0, 16)
-
-                if (-not $questionHashes.ContainsKey($hash)) {
-                    $questionHashes[$hash] = $true
-                    $allQuestions += @{
-                        EntryPoint = $ep.File
-                        Question   = $q
-                        Category   = "ENDPOINT_DOC"
-                    }
-                }
-            }
+            if ($earlyExit) { Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; break }
+            continue
         }
 
-        # Early exit if MaxQuestions cap reached
+        $questions = Parse-QuestionsFromOutput -RawOutput $result.Output
+        if ($questions.Count -eq 0) {
+            Write-Step "[Gap Batch $batchNum] No questions parsed — falling back to per-gap" "WARN"
+            foreach ($g in $batch) {
+                Invoke-SingleGap -Gap $g
+                if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) { $earlyExit = $true; break }
+            }
+            if ($earlyExit) { Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; break }
+            continue
+        }
+
+        # Round-robin distribute questions to batch items
+        $qPerGap = $QuestionsPerEndpoint
+        for ($qi = 0; $qi -lt $questions.Count; $qi++) {
+            $gapIdx = [Math]::Min([Math]::Floor($qi / $qPerGap), $batch.Count - 1)
+            $g = $batch[$gapIdx]
+            $hash = Get-QHash -Text $questions[$qi]
+            if (-not $questionHashes.ContainsKey($hash)) {
+                $questionHashes[$hash] = $true
+                $allQuestions += @{ EntryPoint = $g.File; Question = $questions[$qi]; Category = $g.Type }
+            }
+        }
+        Write-Step "[Gap Batch $batchNum] +$($questions.Count) questions ($($allQuestions.Count) total)" "OK"
         if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
-            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
-            break
+            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; $earlyExit = $true; break
+        }
+    }
+
+    # ── 2. Endpoint documentation questions ──
+    if (-not $earlyExit) {
+        $endpointSample = $Discovery.CodeEndpoints
+        if ($endpointSample.Count -gt 30) {
+            $endpointSample = $endpointSample | Sort-Object { Get-Random } | Select-Object -First 30
+        }
+
+        $batches = @()
+        for ($i = 0; $i -lt $endpointSample.Count; $i += $GapBatchSize) {
+            $end = [Math]::Min($i + $GapBatchSize, $endpointSample.Count)
+            $batches += ,@($endpointSample[$i..($end - 1)])
+        }
+        $totalBatches = $batches.Count
+        $batchNum = 0
+        foreach ($batch in $batches) {
+            $batchNum++
+            Write-Progress -Activity "Generating contract questions" -Status "Endpoint Batch $batchNum/$totalBatches ($($batch.Count) endpoints)" -PercentComplete ([Math]::Round(($batchNum / [Math]::Max($totalBatches, 1)) * 100))
+
+            $epsBlock = ""
+            $eIdx = 0
+            foreach ($ep in $batch) {
+                $eIdx++
+                $epsBlock += "$eIdx. [$($ep.Method) $($ep.Path)] in file $($ep.File)`n"
+            }
+            $totalExpected = $batch.Count * 2
+            $genPrompt = @"
+These API endpoints exist in the codebase:
+$epsBlock
+For EACH endpoint, generate exactly 2 questions covering:
+- Error responses and status codes
+- Authentication/authorization requirements
+- Request/response schema documentation
+Output ONLY a JSON array of strings ($totalExpected total). No explanation, no markdown fences.
+"@
+            Write-Step "[Endpoint Batch $batchNum/$totalBatches] Generating questions for $($batch.Count) endpoints..." "INFO"
+            $result = Invoke-CopilotWithRetry -Prompt $genPrompt -ModelName $script:SelectedModel `
+                -WorkingDirectory $WorkingDirectory -Retries $MaxRetries -BaseDelay $RetryBaseDelay -Timeout $CallTimeout
+
+            if (-not $result -or -not $result.Success) {
+                Write-Step "[Endpoint Batch $batchNum] Batch call failed — falling back to per-endpoint" "WARN"
+                foreach ($ep in $batch) {
+                    Invoke-SingleEndpoint -Ep $ep
+                    if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) { $earlyExit = $true; break }
+                }
+                if ($earlyExit) { Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; break }
+                continue
+            }
+
+            $questions = Parse-QuestionsFromOutput -RawOutput $result.Output
+            if ($questions.Count -eq 0) {
+                Write-Step "[Endpoint Batch $batchNum] No questions parsed — falling back to per-endpoint" "WARN"
+                foreach ($ep in $batch) {
+                    Invoke-SingleEndpoint -Ep $ep
+                    if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) { $earlyExit = $true; break }
+                }
+                if ($earlyExit) { Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; break }
+                continue
+            }
+
+            # Round-robin distribute: 2 questions per endpoint
+            for ($qi = 0; $qi -lt $questions.Count; $qi++) {
+                $epIdx = [Math]::Min([Math]::Floor($qi / 2), $batch.Count - 1)
+                $ep = $batch[$epIdx]
+                $hash = Get-QHash -Text $questions[$qi]
+                if (-not $questionHashes.ContainsKey($hash)) {
+                    $questionHashes[$hash] = $true
+                    $allQuestions += @{ EntryPoint = $ep.File; Question = $questions[$qi]; Category = "ENDPOINT_DOC" }
+                }
+            }
+            Write-Step "[Endpoint Batch $batchNum] +$($questions.Count) questions ($($allQuestions.Count) total)" "OK"
+            if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
+                Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping early" "OK"; break
+            }
         }
     }
 
@@ -655,7 +763,7 @@ function Start-KingLouie {
         }
 
         # ── Phase 3: Question Generation ──
-        $questions = New-ContractQuestions -Discovery $discovery -WorkingDirectory $workDir
+        $questions = New-ContractQuestions -Discovery $discovery -WorkingDirectory $workDir -GapBatchSize $GapBatchSize
 
         if ($questions.Count -eq 0) {
             Write-Step "No questions generated." "WARN"
