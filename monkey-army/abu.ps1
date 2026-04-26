@@ -589,6 +589,12 @@ Example:
         }
 
         Write-Step "Batch $batchNum complete ($($allQuestions.Count) total questions)" "OK"
+
+        # Early exit if MaxQuestions cap reached
+        if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
+            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
+            break
+        }
     }
 
     Write-Progress -Activity "Generating gap-filling questions" -Completed
@@ -748,9 +754,11 @@ function Start-Abu {
         $questions = New-GapQuestions -Gaps $gaps -WorkingDirectory $workDir
 
         # Phase 4: Execution (shared)
+        $docDirs = Get-DocDirectories -RootDir $workDir
         $execStats = Invoke-MonkeyQuestions -Questions $questions -WorkingDirectory $workDir `
             -OutputPath $script:OutputPath -ModelName $script:SelectedModel -MonkeyEmoji $script:MONKEY_EMOJI `
-            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -BatchSize $BatchSize -MaxQuestions $MaxQuestions -ShowVerbose:$ShowVerbose
+            -MaxRetries $MaxRetries -RetryBaseDelay $RetryBaseDelay -CallTimeout $CallTimeout -BatchSize $BatchSize -MaxQuestions $MaxQuestions `
+            -DocDirectories $docDirs -ShowVerbose:$ShowVerbose
 
         # Phase 5: Commit/Stage (standalone only)
         $filesChanged = 0

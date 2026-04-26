@@ -397,7 +397,8 @@ if ($existingCheckpoint) {
 
         $skipCount = $skipMonkeys.Count
         $remainCount = $config.OrderedMonkeys.Count - $skipCount
-        Write-Step "Skipping $skipCount completed monkey(s), running $remainCount remaining" "INFO"
+        $completedLabel = @($skipMonkeys.Keys | Where-Object { $_ -in $config.OrderedMonkeys }) -join ", "
+        Write-Step "Skipping $skipCount completed/skipped monkey(s) ($completedLabel), running $remainCount remaining" "INFO"
     }
     else {
         # Fresh start — remove old checkpoint

@@ -582,6 +582,12 @@ Return ONLY the JSON array, no markdown fences, no explanation.
 
         $allQuestions += $questions
         Write-Host "    ✅ $($questions.Count) questions generated" -ForegroundColor DarkGreen
+
+        # Early exit if MaxQuestions cap reached
+        if ($MaxQuestions -gt 0 -and $allQuestions.Count -ge $MaxQuestions) {
+            Write-Step "Reached MaxQuestions cap ($MaxQuestions) — stopping question generation early" "OK"
+            break
+        }
     }
 
     # Sort: HIGH severity first, then by file severity score
@@ -708,6 +714,7 @@ foreach ($q in $questions) {
     }
 }
 
+$docDirs = Get-DocDirectories -RootDir $workDir
 $results = Invoke-MonkeyQuestions `
     -Questions $monkeyQuestions `
     -WorkingDirectory $workDir `
@@ -719,6 +726,7 @@ $results = Invoke-MonkeyQuestions `
     -CallTimeout $CallTimeout `
     -BatchSize $BatchSize `
     -MaxQuestions $MaxQuestions `
+    -DocDirectories $docDirs `
     -ShowVerbose:$ShowVerbose
 
 # ── Phase 5: Commit & Report ─────────────────────────────────────────
