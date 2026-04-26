@@ -580,8 +580,23 @@ function Invoke-CopilotBatch {
     # ── Build doc directory hint for prompts ──
     $docDirHint = ""
     if ($DocDirectories.Count -gt 0) {
-        $topDirs = $DocDirectories | Select-Object -First 5
-        $docDirHint = " in these doc directories: $($topDirs -join ', ')"
+        $wfDir = $DocDirectories | Where-Object { $_ -match 'workflows' } | Select-Object -First 1
+        $adrDir = $DocDirectories | Where-Object { $_ -match 'adr' } | Select-Object -First 1
+        $exDir = $DocDirectories | Where-Object { $_ -match 'exemplar' } | Select-Object -First 1
+        $rootDoc = $DocDirectories | Where-Object { $_ -notmatch 'workflows|adr|exemplar|security|bug' } | Select-Object -First 1
+
+        $routingRules = @()
+        if ($wfDir) { $routingRules += "- Workflow docs, API references, architecture references, testing strategies, configuration references, error handling docs → ``$wfDir/``" }
+        if ($adrDir) { $routingRules += "- Architecture Decision Records, analysis docs, refactoring strategies, impact assessments → ``$adrDir/``" }
+        if ($exDir)  { $routingRules += "- Code exemplars and implementation guides → ``$exDir/``" }
+        if ($rootDoc) { $routingRules += "- Only top-level index files (like Glossary, doc_registry) belong in ``$rootDoc/`` root" }
+
+        if ($routingRules.Count -gt 0) {
+            $docDirHint = ". IMPORTANT — place new doc files in the correct subfolder:`n$($routingRules -join "`n")`nMatch the naming convention of existing files in each folder (e.g. numbered prefixes like 07_*, snake_case, kebab-case). NEVER create docs in the root docs folder"
+        } else {
+            $topDirs = $DocDirectories | Select-Object -First 5
+            $docDirHint = " in these doc directories: $($topDirs -join ', ')"
+        }
     }
 
     # ── Build question block ──
@@ -1654,8 +1669,21 @@ function Invoke-SingleQuestion {
 
     $singleDocDirHint = ""
     if ($DocDirectories.Count -gt 0) {
-        $topDirs = $DocDirectories | Select-Object -First 5
-        $singleDocDirHint = " in these doc directories: $($topDirs -join ', ')"
+        $wfDir = $DocDirectories | Where-Object { $_ -match 'workflows' } | Select-Object -First 1
+        $adrDir = $DocDirectories | Where-Object { $_ -match 'adr' } | Select-Object -First 1
+        $exDir = $DocDirectories | Where-Object { $_ -match 'exemplar' } | Select-Object -First 1
+
+        $routingRules = @()
+        if ($wfDir) { $routingRules += "workflow/API/architecture/testing/config/error-handling docs → ``$wfDir/``" }
+        if ($adrDir) { $routingRules += "ADRs/analysis/refactoring/impact docs → ``$adrDir/``" }
+        if ($exDir)  { $routingRules += "exemplars/implementation guides → ``$exDir/``" }
+
+        if ($routingRules.Count -gt 0) {
+            $singleDocDirHint = ". Place new docs in the correct subfolder: $($routingRules -join '; '). Match existing naming conventions (numbered prefixes, snake_case, etc). NEVER create docs in the root docs folder"
+        } else {
+            $topDirs = $DocDirectories | Select-Object -First 5
+            $singleDocDirHint = " in these doc directories: $($topDirs -join ', ')"
+        }
     }
 
     $docHealSuffix = " If relevant documentation for this topic is missing or incomplete in the repo, create or update it${singleDocDirHint} following existing doc patterns."
@@ -2279,7 +2307,7 @@ function Get-ArmyConfig {
         else { $config.QuestionsPerFile = 5 }
 
         # BatchSize
-        $config.BatchSize = if ($BatchSize -gt 0) { $BatchSize } else { 50 }
+        $config.BatchSize = if ($BatchSize -gt 0) { $BatchSize } else { 10 }
 
         # MaxQuestions cap
         $config.MaxQuestions = if ($MaxQuestions -gt 0) { $MaxQuestions } else { 500 }
