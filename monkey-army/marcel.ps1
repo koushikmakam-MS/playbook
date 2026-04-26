@@ -424,6 +424,15 @@ function Start-Marcel {
             New-Item -ItemType Directory -Path (Join-Path $script:OutputPath "session-logs") -Force | Out-Null
         }
 
+        # Fast-path: GenOnly + checkpoint exists → skip discovery entirely
+        if ($GenOnly) {
+            $savedQ = Get-QuestionCheckpoint -OutputPath $script:OutputPath
+            if ($savedQ -and $savedQ.Count -gt 0) {
+                Write-Step "Loaded $($savedQ.Count) questions from checkpoint — skipping discovery" "OK"
+                return @{ Questions = $savedQ; Status = 'gen-complete'; MonkeyName = $script:MONKEY_NAME; Count = $savedQ.Count }
+            }
+        }
+
         # Phase 2: Discovery — find stale docs
         $docAnalysis = Invoke-Discovery -WorkDir $workDir
 
