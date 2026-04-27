@@ -126,11 +126,18 @@ Then RUN the autonomous loop — no more human interaction needed:
   STEP 4 — CREATE OR UPDATE DOCS (if auto-fix = yes):
   - PRIORITY: UPDATE existing docs over creating new ones.
     Only create a new doc if NO existing doc covers this controller.
+  - FOLDER ROUTING (non-negotiable):
+    - API/controller workflows → `workflows/`
+    - Config references, API contracts, architecture notes → `reference/`
+    - Testing strategies, coverage plans → `testing/`
+    - Design decisions → `adr/`
+    NEVER put reference/testing/design docs in workflows/.
   - For each "Add to" action (PREFERRED): read the controller, then
     add the missing sections to the existing doc covering that
     controller's APIs, flow, config, errors. Do NOT create a new file.
   - For each "Create new" action (ONLY when no existing doc fits):
-    create a workflow doc with these REQUIRED sections in this exact order:
+    create a doc in the CORRECT folder per routing above.
+    Workflow docs MUST use these REQUIRED sections in this exact order:
 
     ## Related Docs
     ## 1. Overview

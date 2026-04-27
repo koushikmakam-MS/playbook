@@ -462,7 +462,19 @@ function New-GapQuestions {
         $gapDescriptions = @()
         foreach ($gap in $batch) {
             if ($gap.Type -eq "UNDOCUMENTED_CODE") {
-                $gapDescriptions += "- FILE: `"$($gap.Target)`" — UNDOCUMENTED. Generate $QuestionsPerGap questions covering the standard workflow doc sections: Overview, Trigger Points, API Endpoints, Request/Response Flow, Sequence Diagram (mermaid required), Key Source Files, Configuration, Telemetry, Debug, Error Scenarios."
+                # Classify: controllers/handlers → workflow, test files → testing, config/utils → reference
+                $target = $gap.Target
+                $docType = if ($target -match 'Controller|Handler|Worker|Job') { "workflow" }
+                           elseif ($target -match 'Test|Spec|Mock') { "testing" }
+                           else { "reference" }
+                
+                if ($docType -eq "workflow") {
+                    $gapDescriptions += "- FILE: `"$target`" — UNDOCUMENTED (workflow). Generate $QuestionsPerGap questions covering the standard workflow doc sections: Overview, Trigger Points, API Endpoints, Request/Response Flow, Sequence Diagram (mermaid required), Key Source Files, Configuration, Telemetry, Debug, Error Scenarios. Doc MUST go in workflows/ folder."
+                } elseif ($docType -eq "testing") {
+                    $gapDescriptions += "- FILE: `"$target`" — UNDOCUMENTED (testing). Generate $QuestionsPerGap questions about test strategy, coverage, mocking approach, and edge cases. Doc MUST go in testing/ folder."
+                } else {
+                    $gapDescriptions += "- FILE: `"$target`" — UNDOCUMENTED (reference). Generate $QuestionsPerGap questions about API contracts, configuration, architecture patterns. Doc MUST go in reference/ folder."
+                }
             }
             elseif ($gap.Type -eq "INCOMPLETE_DOC") {
                 $missingSections = $gap.MissingSections -join ", "
@@ -642,14 +654,29 @@ function New-SingleGapQuestions {
 
     $genPrompt = ""
     if ($Gap.Type -eq "UNDOCUMENTED_CODE") {
-        $genPrompt = @"
-The file '$($Gap.Target)' has NO documentation. Generate exactly $QuestionsPerGap questions that would produce a complete workflow doc following this standard:
+        $target = $Gap.Target
+        $docType = if ($target -match 'Controller|Handler|Worker|Job') { "workflow" }
+                   elseif ($target -match 'Test|Spec|Mock') { "testing" }
+                   else { "reference" }
+        
+        if ($docType -eq "workflow") {
+            $genPrompt = @"
+The file '$target' has NO documentation. Generate exactly $QuestionsPerGap questions that would produce a complete workflow doc (in workflows/ folder) following this standard:
 
 Required sections (use ## N. format): 1. Overview, 2. Trigger Points, 3. API Endpoints, 4. Request/Response Flow, 5. Sequence Diagram (MUST include mermaid), 6. Key Source Files, 7. Configuration Dependencies, 8. Telemetry & Logging, 9. How to Debug, 10. Error Scenarios.
 
 Generate questions that cover ALL required sections. Include at least one question about creating a mermaid sequence diagram.
 Output ONLY a JSON array of strings.
 "@
+        } else {
+            $folder = if ($docType -eq "testing") { "testing/" } else { "reference/" }
+            $genPrompt = @"
+The file '$target' has NO documentation. Generate exactly $QuestionsPerGap questions that would produce a $docType doc (in $folder folder).
+
+Focus on: purpose/overview, key interfaces, configuration, usage patterns, and relationships to other components.
+Output ONLY a JSON array of strings.
+"@
+        }
     }
     elseif ($Gap.Type -eq "INCOMPLETE_DOC") {
         $missingSections = $Gap.MissingSections -join ", "

@@ -255,8 +255,13 @@ Prompt:
      STEP 6 — OUTPUT: DOMAIN ROSTER TABLE
        | # | Domain Name | Entry Points | Shared Impl | Doc Type | Workflow Doc |
        Doc Type = "workflow" (has API surface) or "design" (internal
-       pattern) or "reference" (shared infrastructure)
-       Workflow Doc = relative path to the doc file, e.g., `workflows/01_Orders.md`
+       pattern) or "reference" (shared infrastructure) or "testing"
+       (test strategy/coverage)
+       Workflow Doc = relative path to the doc file:
+         - Doc Type "workflow" → `workflows/NN_DomainName.md`
+         - Doc Type "reference" → `reference/NN_DomainName.md`
+         - Doc Type "testing" → `testing/NN_DomainName.md`
+         - Doc Type "design" → `adr/NN_DomainName.md`
        (leave blank for domains not yet documented — Phase 2 fills these in)
 
      Save the domain roster in the Discovery Manifest under
@@ -385,6 +390,15 @@ Prompt:
   `.github/copilot-instructions.md`.
 
   Create workflow docs in `{DOCS_ROOT}/workflows/` with README index.
+  Create reference docs in `{DOCS_ROOT}/reference/` with README index.
+  Create testing docs in `{DOCS_ROOT}/testing/` with README index.
+
+  FOLDER ROUTING (non-negotiable):
+  - Doc Type "workflow" → `{DOCS_ROOT}/workflows/`  (10-section standard)
+  - Doc Type "reference" → `{DOCS_ROOT}/reference/` (lighter: Overview + tables)
+  - Doc Type "testing" → `{DOCS_ROOT}/testing/`     (test strategy format)
+  - Doc Type "design" → `{DOCS_ROOT}/adr/`          (ADR format)
+  NEVER put reference/testing/design docs in workflows/.
 
   SCOPE: «3–5 domains, e.g., "Orders, Payments, Users"
           — small repos can list all at once»
@@ -462,6 +476,38 @@ Prompt:
   Update Discovery Manifest if new domains found.
 
   OUTPUT: List files created, domains covered, new domains discovered.
+
+
+>> FOLLOW-UP — Structural Validation (MANDATORY before proceeding):
+
+  For EACH doc created in Phase 2, run this checklist:
+
+  1. FOLDER CHECK: Doc Type in manifest matches actual folder:
+     - "workflow" docs MUST be in `workflows/`
+     - "reference" docs MUST be in `reference/`
+     - "testing" docs MUST be in `testing/`
+     - "design" docs MUST be in `adr/`
+     If wrong folder → MOVE the file immediately.
+
+  2. HEADER CHECK: Every workflow doc MUST have these EXACT headers:
+     - `## Related Docs`
+     - `## 1. Overview` (not `## Overview`)
+     - `## 2. Trigger Points` or `## 2. Key Components`
+     - `## 3. API Endpoints` or `## 3. Key Workers`
+     - `## 4. Request/Response Flow`
+     - `## 5. Sequence Diagram`
+     - `## 6. Key Source Files`
+     - `## 7. Configuration Dependencies`
+     - `## 8. Telemetry & Logging`
+     - `## 9. How to Debug`
+     - `## 10. Error Scenarios`
+     If ANY header uses unnumbered format (e.g., `## Overview`) → RENAME it.
+
+  3. MERMAID CHECK: Every workflow doc MUST contain ```mermaid.
+     If missing → ADD a placeholder with TODO comment.
+
+  OUTPUT — STRUCTURAL VALIDATION TABLE:
+  | Doc | Folder OK? | Headers OK? | Mermaid OK? | Fixes Applied |
 
 
 >> FOLLOW-UP — Standards Audit:
