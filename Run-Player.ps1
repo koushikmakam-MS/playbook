@@ -948,16 +948,21 @@ Write-Step "Preflight: sampling docs to decide what cleanup is needed..." "INFO"
 $preCleanupScore = Get-DocHealthScore -RepoPath $workDir -IncludeBonus -TargetAgents $config['TargetAgents']
 Write-Step "Pre-cleanup score: $($preCleanupScore.TotalScore)/$($preCleanupScore.MaxScore) ($($preCleanupScore.Grade))" "INFO"
 
-# Collect .md files in agent doc folders that differ from base branch (scoped cleanup)
+# Discover doc folders dynamically (same function monkeys use) and scope to diff from base
+$agentDocPaths = Get-DocDirectories -RootDir $workDir
+Write-Step "Agent doc folders: $($agentDocPaths -join ', ')" "INFO"
+
+# Get top-level roots from discovered paths (e.g. 'docs', 'copilot-docs')
+$docRoots = @($agentDocPaths | ForEach-Object { ($_ -split '/')[0] } | Sort-Object -Unique)
+
 Push-Location $workDir
 $baseBranch = if ($config['BaseBranch']) { $config['BaseBranch'] } else { 'main' }
-$agentDocPaths = @('docs/agentKT', 'copilot-docs')
 $runMdFiles = @()
-foreach ($docPath in $agentDocPaths) {
+foreach ($docRoot in $docRoots) {
     # Committed .md files that differ from base
-    $diffOutput = @(& git --no-pager diff --name-only --diff-filter=AM "$baseBranch" -- "$docPath/*.md" "$docPath/**/*.md" 2>&1 | Where-Object { $_ -and $_ -notmatch '^fatal' })
+    $diffOutput = @(& git --no-pager diff --name-only --diff-filter=AM "$baseBranch" -- "$docRoot/*.md" "$docRoot/**/*.md" 2>&1 | Where-Object { $_ -and $_ -notmatch '^fatal' })
     # Uncommitted .md files in agent folders
-    $statusOutput = @(& git --no-pager status --porcelain -- "$docPath" 2>&1 | Where-Object { $_ -match '\.md"?\s*$' } | ForEach-Object { ($_ -replace '^\s*\?\?\s*|^\s*[MADRCU]+\s*', '').Trim('"') })
+    $statusOutput = @(& git --no-pager status --porcelain -- "$docRoot" 2>&1 | Where-Object { $_ -match '\.md"?\s*$' } | ForEach-Object { ($_ -replace '^\s*\?\?\s*|^\s*[MADRCU]+\s*', '').Trim('"') })
     foreach ($relPath in @($diffOutput + $statusOutput | Sort-Object -Unique | Where-Object { $_ })) {
         $fullPath = Join-Path $workDir $relPath
         if (Test-Path $fullPath) { $runMdFiles += Get-Item $fullPath }
@@ -1023,8 +1028,9 @@ if ($allDocs.Count -ge 4) {
 
 # Signal 3: Index staleness (check README.md in doc folders)
 $staleIndexes = 0
-foreach ($rootDocDir in @("docs\agentKT\workflows", "docs\agentKT\adr", "copilot-docs\workflows", "copilot-docs\adr")) {
-    $dirPath = Join-Path $workDir $rootDocDir
+$indexableDirs = @($agentDocPaths | Where-Object { $_ -match 'workflows|adr' })
+foreach ($relDir in $indexableDirs) {
+    $dirPath = Join-Path $workDir $relDir
     if (-not (Test-Path $dirPath)) { continue }
     $readmePath = Join-Path $dirPath "README.md"
     $mdFiles = @(Get-ChildItem $dirPath -Filter "*.md" -File | Where-Object { $_.Name -ne "README.md" })
@@ -1237,8 +1243,8 @@ if ($hasProposals) {
 if ($runIndex -or $forceAll) {
 Write-Step "Step 3: Rebuilding index files..." "INFO"
 $docRootDirs = @()
-foreach ($rootDocDir in @("docs\agentKT\workflows", "docs\agentKT\adr", "copilot-docs\workflows", "copilot-docs\adr")) {
-    $dirPath = Join-Path $workDir $rootDocDir
+foreach ($relDir in $indexableDirs) {
+    $dirPath = Join-Path $workDir $relDir
     if (Test-Path $dirPath) { $docRootDirs += $dirPath }
 }
 
