@@ -253,9 +253,11 @@ Prompt:
        - Background workers/jobs → domain per worker type
 
      STEP 6 — OUTPUT: DOMAIN ROSTER TABLE
-       | # | Domain Name | Entry Points | Shared Impl | Doc Type |
+       | # | Domain Name | Entry Points | Shared Impl | Doc Type | Workflow Doc |
        Doc Type = "workflow" (has API surface) or "design" (internal
        pattern) or "reference" (shared infrastructure)
+       Workflow Doc = relative path to the doc file, e.g., `workflows/01_Orders.md`
+       (leave blank for domains not yet documented — Phase 2 fills these in)
 
      Save the domain roster in the Discovery Manifest under
      "Identified Domains" using this table format.
@@ -308,6 +310,29 @@ Prompt:
      rules, testing rules, anti-patterns table, doc self-healing triggers,
      **Response Style rules** (concise answers, tables over prose, no
      narration, no triple-stating, 1-line edit summaries).
+
+     MUST INCLUDE these two critical sections:
+
+     A. **Doc Self-Healing Triggers** with these rules:
+        - Stale path → update doc
+        - Missing error code → add to reference
+        - Missing config key → add to workflow doc
+        - Undocumented method → add to appropriate workflow doc
+        - Wrong claim → fix with <!-- Fixed YYYY-MM-DD --> comment
+        - New controller → FIRST check if existing workflow doc covers
+          this domain. If found → UPDATE. ONLY if none → CREATE new doc
+          using the Workflow Doc Template below
+        - After fixing → update doc_registry.md
+
+     B. **Workflow Doc Template** — embed the EXACT 10+1 section standard:
+        ## Related Docs, ## 1. Overview, ## 2. Trigger Points,
+        ## 3. API Endpoints, ## 4. Request/Response Flow,
+        ## 5. Sequence Diagram (MUST contain mermaid),
+        ## 6. Key Source Files, ## 7. Configuration Dependencies,
+        ## 8. Telemetry & Logging, ## 9. How to Debug,
+        ## 10. Error Scenarios
+        Include non-negotiable rules: ## N. numbering, mermaid required,
+        real source code references only.
 
      SKILL TABLE WIRING: If existing skills were found in Phase 0, the
      skill table MUST use their ACTUAL paths (which may differ from
@@ -367,13 +392,50 @@ Prompt:
   SOURCE READING: Per domain read controller + service/BL + downstream
   dependency (min 3 files). More if flow branches.
 
-  Each workflow doc includes:
-  - Trigger Points
-  - API Endpoints table (operation, method, route, constants)
-  - Request/Response Flow (step-by-step with real code paths)
-    **WITH Mermaid sequence diagram** — every flow section MUST include
-    a ```mermaid sequence diagram showing the call chain across layers.
-    Example:
+  Each workflow doc MUST use this exact structure with numbered headers:
+
+  ```markdown
+  ## Related Docs
+  <!-- Links to related workflow docs, ADRs, and reference docs -->
+
+  ## 1. Overview
+  <!-- High-level description of this workflow/domain -->
+
+  ## 2. Trigger Points
+  <!-- What initiates this workflow: HTTP endpoints, queue messages, timers -->
+
+  ## 3. API Endpoints
+  <!-- Table: Operation | HTTP Method | Route | Constants -->
+
+  ## 4. Request/Response Flow
+  <!-- Step-by-step flow with real code paths and class names -->
+
+  ## 5. Sequence Diagram
+  <!-- MUST include a mermaid sequenceDiagram block — see rules below -->
+
+  ## 6. Key Source Files
+  <!-- Table: File Path | Class/Interface | Purpose -->
+
+  ## 7. Configuration Dependencies
+  <!-- Table: Config Key | Default | Purpose | Where Used -->
+
+  ## 8. Telemetry & Logging
+  <!-- Tracer classes, DiagComponent IDs, LogEvent patterns -->
+
+  ## 9. How to Debug
+  <!-- Kusto queries, breakpoints, diagnostic steps -->
+
+  ## 10. Error Scenarios
+  <!-- Table: Error | Cause | Recovery | Code Reference -->
+  ```
+
+  NON-NEGOTIABLE RULES:
+  - Section numbering MUST use `## N.` format (e.g., `## 1. Overview`)
+  - For background workers: use "Key Components" for §2, "Key Workers" for §3
+  - Extra sections (§11+) are encouraged but §1-§10 are required
+  - Every workflow doc MUST include at least one mermaid sequence diagram
+
+  **Mermaid sequence diagram** — every §5 MUST include a ```mermaid block:
     ```mermaid
     sequenceDiagram
       participant Client
@@ -395,15 +457,6 @@ Prompt:
     - Show config checks that change flow direction
     - Minimum 4 participants for any cross-layer flow
     - For complex flows, split into multiple diagrams (happy path + error path)
-  - Key Source Files table
-  - Configuration Dependencies table
-  - Telemetry & Logging
-  - How to Debug (with ready-to-use queries)
-  - Error Scenarios table (error → cause → debug steps)
-  - **Architecture Decision Notes** — if the workflow has non-obvious design
-    choices (e.g., "why does force delete bypass store settings?", "why is
-    soft delete checked before force delete?"), add a brief note with context.
-    These feed into the ADR system (Phase 2C).
 
   Use real class/method names and file paths. Number sequentially (01_, 02_...).
   Update Discovery Manifest if new domains found.
@@ -939,10 +992,19 @@ Prompt (all skills, one pass):
      - Knowledge Sources table includes paths from BOTH
      - Skill table link in copilot-instructions.md points to the
        actual file path (not a stale or wrong path)
+  8. DOC-FIRST GATE CHECK: For every skill that triggers code changes
+     or test creation (e.g., coding, add-test-cases, code-review,
+     design-principles), verify:
+     - Has a "🛑 BEFORE IMPLEMENTING" or "🛑 BEFORE WRITING" section
+     - That section appears BEFORE the "When To Use" section
+     - References reading workflow docs from {DOCS_ROOT}/workflows/
+     - Includes a "Why this matters" explanation
+     If missing, ADD the doc-first gate using the template from Phase 3B.
+     Utility/styling skills (concise, pr-create) are exempt.
   Fix in-place.
 
   OUTPUT — SKILL VALIDATION TABLE:
-  | Skill | Sources OK? | Templates OK? | Contradictions? | Duplicates? | Fixes |
+  | Skill | Sources OK? | Templates OK? | Contradictions? | Duplicates? | Doc-First Gate? | Fixes |
 
 
 ── 4E: Curiosity Monkey (Autonomous Documentation Stress Test) ──

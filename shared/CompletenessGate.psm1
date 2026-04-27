@@ -66,19 +66,52 @@ function Build-DomainContracts {
     #>
     param(
         [Parameter(Mandatory)][string]$RepoPath,
-        [string]$ManifestPath
+        [string]$ManifestPath,
+        [string]$DocsRoot
     )
 
-    # Auto-discover manifest
-    if (-not $ManifestPath) {
-        $candidates = @(
-            (Join-Path $RepoPath "docs\knowledge\Discovery_Manifest.md"),
-            (Join-Path $RepoPath "docs\knowledge\discovery_manifest.md"),
-            (Join-Path $RepoPath "docs\Discovery_Manifest.md")
+    # Auto-discover DOCS_ROOT if not provided
+    if (-not $DocsRoot) {
+        # Search for Discovery_Manifest.md anywhere under the repo
+        $manifestCandidates = @(
+            (Get-ChildItem -Path $RepoPath -Recurse -Filter "Discovery_Manifest.md" -ErrorAction SilentlyContinue |
+                Select-Object -First 3)
         )
-        foreach ($c in $candidates) {
-            if (Test-Path $c) { $ManifestPath = $c; break }
+        if ($manifestCandidates.Count -gt 0) {
+            $DocsRoot = $manifestCandidates[0].Directory.FullName
+            if (-not $ManifestPath) { $ManifestPath = $manifestCandidates[0].FullName }
+        } else {
+            # Fallback: check common DOCS_ROOT patterns
+            $commonRoots = @("docs\knowledge", "docs\knowledge", "docs", "copilot-docs")
+            foreach ($root in $commonRoots) {
+                $candidate = Join-Path $RepoPath $root
+                if (Test-Path $candidate) { $DocsRoot = $candidate; break }
+            }
         }
+    }
+
+    # Auto-discover manifest if still not found
+    if (-not $ManifestPath) {
+        if ($DocsRoot) {
+            $mPath = Join-Path $DocsRoot "Discovery_Manifest.md"
+            if (Test-Path $mPath) { $ManifestPath = $mPath }
+        }
+        # Legacy fallback
+        if (-not $ManifestPath) {
+            $legacyCandidates = @(
+                (Join-Path $RepoPath "docs\knowledge\Discovery_Manifest.md"),
+                (Join-Path $RepoPath "docs\knowledge\discovery_manifest.md"),
+                (Join-Path $RepoPath "docs\Discovery_Manifest.md")
+            )
+            foreach ($c in $legacyCandidates) {
+                if (Test-Path $c) { $ManifestPath = $c; break }
+            }
+        }
+    }
+
+    # Derive DocsRoot from manifest location if we have manifest but no DocsRoot
+    if ($ManifestPath -and -not $DocsRoot) {
+        $DocsRoot = Split-Path $ManifestPath -Parent
     }
 
     if (-not $ManifestPath -or -not (Test-Path $ManifestPath)) {
@@ -90,22 +123,33 @@ function Build-DomainContracts {
 
     # Parse the Identified Domains table
     # Format: | # | Domain Name | Entry Points | Shared Impl | Doc Type | Workflow Doc |
+    # Also supports 5-column format (without Workflow Doc) — derives doc path from domain name
     $contracts = @()
     $tableLines = $content -split "`n" | Where-Object { $_ -match '^\|\s*\d+\s*\|' }
 
     foreach ($line in $tableLines) {
         $cells = ($line -split '\|') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-        if ($cells.Count -lt 6) { continue }
+        if ($cells.Count -lt 5) { continue }
 
         $domainNum    = $cells[0].Trim()
         $domainName   = $cells[1].Trim()
         $entryPoints  = $cells[2].Trim()
         $sharedImpl   = $cells[3].Trim()
         $docType      = $cells[4].Trim().ToLower()
-        $workflowDoc  = $cells[5].Trim()
+
+        # 6-column format has explicit Workflow Doc; 5-column derives from domain name
+        $workflowDoc = if ($cells.Count -ge 6) { $cells[5].Trim() } else { "" }
 
         # Extract relative path from backticks: `workflows/01_User_Auth.md`
-        $docRelPath = if ($workflowDoc -match '`([^`]+\.md)`') { $matches[1] } else { $workflowDoc }
+        $docRelPath = if ($workflowDoc -match '`([^`]+\.md)`') {
+            $matches[1]
+        } elseif ($workflowDoc -and $workflowDoc -match '\.md') {
+            $workflowDoc
+        } else {
+            # Derive from domain name: "User Auth" → "workflows/NN_User_Auth.md"
+            $safeName = ($domainName -replace '[/\\:\s]+', '_' -replace '[^\w_]', '')
+            "workflows/${safeName}.md"
+        }
 
         # Determine required sections based on doc type
         $requiredSections = switch -Regex ($docType) {
@@ -114,8 +158,8 @@ function Build-DomainContracts {
             default     { $script:PrimaryWorkflowSections }  # default to workflow standard
         }
 
-        # Resolve doc path: try exact match first, then fuzzy match by name keyword
-        $docFullPath = Join-Path $RepoPath "docs\knowledge" $docRelPath
+        # Resolve doc path using DocsRoot (not hardcoded)
+        $docFullPath = Join-Path $DocsRoot $docRelPath
         $resolvedRelPath = $docRelPath
 
         if (-not (Test-Path $docFullPath)) {
@@ -123,7 +167,7 @@ function Build-DomainContracts {
             $docFileName = [IO.Path]::GetFileNameWithoutExtension($docRelPath)
             $keyword = ($docFileName -replace '^\d+_', '')  # strip leading number_
             if ($keyword) {
-                $workflowDir = Join-Path $RepoPath "docs\knowledge\workflows"
+                $workflowDir = Join-Path $DocsRoot "workflows"
                 if (Test-Path $workflowDir) {
                     $fuzzyMatch = Get-ChildItem $workflowDir -Filter "*${keyword}*.md" -ErrorAction SilentlyContinue |
                         Where-Object { $_.Name -match "^\d+_" } |
@@ -509,16 +553,17 @@ function Invoke-CompletenessGate {
     param(
         [Parameter(Mandatory)][string]$RepoPath,
         [switch]$ValidateRefs,
-        [switch]$Quiet
+        [switch]$Quiet,
+        [string]$DocsRoot
     )
 
     # Step 1: Build contracts from manifest
-    $contracts = Build-DomainContracts -RepoPath $RepoPath
+    $contracts = Build-DomainContracts -RepoPath $RepoPath -DocsRoot $DocsRoot
 
     if ($contracts.Count -eq 0) {
-        Write-Warning "No domain contracts found. Completeness gate skipped."
+        Write-Warning "No domain contracts found. Completeness gate FAILED — no manifest discovered."
         return @{
-            GateResult       = [PSCustomObject]@{ Pass = $true; Verdict = "SKIP — no manifest found"; Results = @() }
+            GateResult       = [PSCustomObject]@{ Pass = $false; Verdict = "FAIL — no manifest found"; Results = @() }
             Contracts        = @()
             RemediationQueue = @()
         }
