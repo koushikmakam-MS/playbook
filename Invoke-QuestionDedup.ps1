@@ -28,6 +28,8 @@ param(
     [string]$BenchmarkPath,
     [string]$OutputPath,
     [double]$JaccardThreshold = 0.60,
+    [double]$CompositeAutoMerge = 0.75,   # Composite score above this → auto-merge locally
+    [double]$CompositeLLMThreshold = 0.40, # Composite score above this → send to LLM
     [switch]$DryRun,
     [switch]$SkipLLM,
     [string]$Model,
@@ -72,6 +74,39 @@ function Get-JaccardSimilarity {
     $union.UnionWith($setB)
     if ($union.Count -eq 0) { return 0 }
     return [Math]::Round($intersection.Count / $union.Count, 4)
+}
+
+function Get-SetSimilarity {
+    param([System.Collections.Generic.HashSet[string]]$A, [System.Collections.Generic.HashSet[string]]$B)
+    if ($A.Count -eq 0 -or $B.Count -eq 0) { return 0 }
+    $inter = [System.Collections.Generic.HashSet[string]]::new($A); $inter.IntersectWith($B)
+    $union = [System.Collections.Generic.HashSet[string]]::new($A); $union.UnionWith($B)
+    if ($union.Count -eq 0) { return 0 }
+    return [Math]::Round($inter.Count / $union.Count, 4)
+}
+
+function Get-CodeTerms {
+    param([string]$Text)
+    $matches = [regex]::Matches($Text, '[A-Z][a-z]+(?:[A-Z][a-z]+)+|[a-z]+(?:[A-Z][a-z]+)+')
+    $terms = $matches | ForEach-Object { $_.Value.ToLower() }
+    return [System.Collections.Generic.HashSet[string]]::new([string[]]@($terms | Sort-Object -Unique))
+}
+
+function Get-Bigrams {
+    param([string]$Text)
+    $words = (Normalize-QuestionText $Text) -split '\s+' | Where-Object { $_.Length -gt 2 }
+    $bigrams = @()
+    for ($i = 0; $i -lt $words.Count - 1; $i++) { $bigrams += "$($words[$i]) $($words[$i+1])" }
+    return [System.Collections.Generic.HashSet[string]]::new([string[]]@($bigrams | Sort-Object -Unique))
+}
+
+function Get-CompositeScore {
+    param($QA, $QB)
+    $wordSim = Get-SetSimilarity $QA.WordSet $QB.WordSet
+    $codeSim = Get-SetSimilarity $QA.CodeTerms $QB.CodeTerms
+    $bigramSim = Get-SetSimilarity $QA.Bigrams $QB.Bigrams
+    # Weighted: code terms (most semantic) > bigrams (phrase match) > words (bag-of-words)
+    return [Math]::Round(($wordSim * 0.25) + ($codeSim * 0.45) + ($bigramSim * 0.30), 4)
 }
 
 function Normalize-EntryPoint {
@@ -128,6 +163,9 @@ foreach ($file in $questionFiles) {
         $category = if ($q.Category) { $q.Category.ToLower() } else { "auto" }
         $questionText = $q.Question
 
+        $wordBag = Get-WordBag $questionText
+        $wordSet = [System.Collections.Generic.HashSet[string]]::new([string[]]@($wordBag))
+
         $allQuestions += [PSCustomObject]@{
             Id            = "$monkeyName-Q$qIndex"
             GlobalId      = $globalId
@@ -136,13 +174,16 @@ foreach ($file in $questionFiles) {
             Question      = $questionText
             EntryPoint    = $entryPoint
             NormalizedText = Normalize-QuestionText $questionText
-            WordBag       = Get-WordBag $questionText
+            WordBag       = $wordBag
+            WordSet       = $wordSet
+            CodeTerms     = Get-CodeTerms $questionText
+            Bigrams       = Get-Bigrams $questionText
             Hash          = [System.BitConverter]::ToString(
                 [System.Security.Cryptography.SHA256]::Create().ComputeHash(
                     [System.Text.Encoding]::UTF8.GetBytes((Normalize-QuestionText $questionText))
                 )
             ).Replace("-", "").Substring(0, 16)
-            Decision      = "KEEP"           # default: keep everything
+            Decision      = "KEEP"
             MergedInto    = $null
             Reason        = $null
             Stage         = $null
@@ -181,108 +222,90 @@ foreach ($group in $hashGroups) {
 Write-Host "    Removed: $stage1Removed exact duplicates" -ForegroundColor $(if ($stage1Removed -gt 0) { "Yellow" } else { "Green" })
 
 # ══════════════════════════════════════════════════════════════════
-#  STAGE 2: LOCAL FUZZY FILTER (Jaccard on same-file + same-category)
+#  STAGE 2: COMPOSITE PRE-FILTER (words + code-terms + bigrams)
 # ══════════════════════════════════════════════════════════════════
 
-Write-Host "  [STAGE 2] Local fuzzy filter (Jaccard >= $JaccardThreshold, same file)..." -ForegroundColor White
+Write-Host "  [STAGE 2] Composite pre-filter (auto-merge >= $CompositeAutoMerge, LLM >= $CompositeLLMThreshold)..." -ForegroundColor White
+Write-Host "    Weights: words=0.25, code-terms=0.45, bigrams=0.30" -ForegroundColor Gray
 
-# Only consider questions still alive
 $alive = $allQuestions | Where-Object { $_.Decision -eq "KEEP" }
-
-# Group by canonical file only (cross-category comparison — LLM decides if different angles are dupes)
-$fileGroups = $alive | Group-Object { $_.EntryPoint }
+$fileGroups = $alive | Group-Object { $_.EntryPoint } | Where-Object { $_.Count -ge 2 }
 
 $candidateClusters = @()
 $stage2Removed = 0
 
 foreach ($fg in $fileGroups) {
     $members = @($fg.Group)
-    if ($members.Count -lt 2) { continue }
 
-    # Check if multiple monkeys contribute to this file
-    $monkeyCount = ($members | Select-Object -ExpandProperty Monkey -Unique).Count
+    # Compute pairwise composite scores and build union-find
+    $parent = @{}
+    foreach ($m in $members) { $parent[$m.Id] = $m.Id }
 
-    if ($monkeyCount -ge 2) {
-        # Multiple monkeys on same file — always send to LLM for semantic review
-        # Split into sub-batches if too large
-        if ($members.Count -le $MaxPerBatch) {
-            $candidateClusters += ,@($members)
-        } else {
-            # Chunk into MaxPerBatch-sized groups
-            for ($c = 0; $c -lt $members.Count; $c += $MaxPerBatch) {
-                $chunk = @($members[$c..([Math]::Min($c + $MaxPerBatch - 1, $members.Count - 1))])
-                if ($chunk.Count -ge 2) { $candidateClusters += ,@($chunk) }
-            }
-        }
-    } else {
-        # Same monkey, same file — use Jaccard for local dedup
-        # Build adjacency: union-find for connected components
-        $parent = @{}
-        foreach ($m in $members) { $parent[$m.Id] = $m.Id }
+    function Find-Root { param([string]$x)
+        while ($parent[$x] -ne $x) { $parent[$x] = $parent[$parent[$x]]; $x = $parent[$x] }
+        return $x
+    }
+    function Union-Nodes { param([string]$a, [string]$b)
+        $ra = Find-Root $a; $rb = Find-Root $b
+        if ($ra -ne $rb) { $parent[$ra] = $rb }
+    }
 
-        function Find-Root {
-            param([string]$x)
-            while ($parent[$x] -ne $x) {
-                $parent[$x] = $parent[$parent[$x]]
-                $x = $parent[$x]
-            }
-            return $x
-        }
+    $autoMergePairs = @()
+    $llmCandidatePairs = @()
 
-        function Union-Nodes {
-            param([string]$a, [string]$b)
-            $ra = Find-Root $a
-            $rb = Find-Root $b
-            if ($ra -ne $rb) { $parent[$ra] = $rb }
-        }
+    for ($i = 0; $i -lt $members.Count; $i++) {
+        if ($members[$i].Decision -ne "KEEP") { continue }
+        for ($j = $i + 1; $j -lt $members.Count; $j++) {
+            if ($members[$j].Decision -ne "KEEP") { continue }
 
-        for ($i = 0; $i -lt $members.Count; $i++) {
-            for ($j = $i + 1; $j -lt $members.Count; $j++) {
-                $sim = Get-JaccardSimilarity -A $members[$i].WordBag -B $members[$j].WordBag
-                if ($sim -ge $JaccardThreshold) {
-                    Union-Nodes $members[$i].Id $members[$j].Id
-                }
-            }
-        }
+            $score = Get-CompositeScore $members[$i] $members[$j]
 
-        $components = @{}
-        foreach ($m in $members) {
-            $root = Find-Root $m.Id
-            if (-not $components[$root]) { $components[$root] = @() }
-            $components[$root] += $m
-        }
+            if ($score -ge $CompositeAutoMerge) {
+                # High confidence — auto-merge locally
+                $loser = if ($MonkeyPriority[$members[$i].Monkey] -le $MonkeyPriority[$members[$j].Monkey]) {
+                    $members[$j] } else { $members[$i] }
+                $winner = if ($loser.Id -eq $members[$j].Id) { $members[$i] } else { $members[$j] }
 
-        foreach ($comp in $components.Values) {
-            if ($comp.Count -lt 2) { continue }
-
-            $avgSim = 0; $pairCount = 0
-            for ($i = 0; $i -lt $comp.Count; $i++) {
-                for ($j = $i + 1; $j -lt $comp.Count; $j++) {
-                    $avgSim += Get-JaccardSimilarity -A $comp[$i].WordBag -B $comp[$j].WordBag
-                    $pairCount++
-                }
-            }
-            $avgSim = if ($pairCount -gt 0) { $avgSim / $pairCount } else { 0 }
-
-            if ($avgSim -ge 0.85) {
-                $sorted = $comp | Sort-Object { $MonkeyPriority[$_.Monkey] }
-                $keeper = $sorted[0]
-                for ($k = 1; $k -lt $sorted.Count; $k++) {
-                    $sorted[$k].Decision = "REMOVED"
-                    $sorted[$k].MergedInto = $keeper.Id
-                    $sorted[$k].Reason = "High Jaccard ($([Math]::Round($avgSim, 2))) auto-merge"
-                    $sorted[$k].Stage = "jaccard-auto"
+                if ($loser.Decision -eq "KEEP") {
+                    $loser.Decision = "REMOVED"
+                    $loser.MergedInto = $winner.Id
+                    $loser.Reason = "Composite auto-merge (score=$score)"
+                    $loser.Stage = "composite-auto"
                     $stage2Removed++
                 }
-            } else {
-                $candidateClusters += ,@($comp)
+            } elseif ($score -ge $CompositeLLMThreshold) {
+                # Medium confidence — cluster for LLM review
+                Union-Nodes $members[$i].Id $members[$j].Id
+            }
+        }
+    }
+
+    # Extract connected components for LLM candidates
+    $components = @{}
+    foreach ($m in $members) {
+        if ($m.Decision -ne "KEEP") { continue }
+        $root = Find-Root $m.Id
+        if (-not $components[$root]) { $components[$root] = @() }
+        $components[$root] += $m
+    }
+
+    foreach ($comp in $components.Values) {
+        if ($comp.Count -lt 2) { continue }
+        if ($comp.Count -le $MaxPerBatch) {
+            $candidateClusters += ,@($comp)
+        } else {
+            for ($c = 0; $c -lt $comp.Count; $c += $MaxPerBatch) {
+                $chunk = @($comp[$c..([Math]::Min($c + $MaxPerBatch - 1, $comp.Count - 1))])
+                if ($chunk.Count -ge 2) { $candidateClusters += ,@($chunk) }
             }
         }
     }
 }
 
-Write-Host "    Auto-merged: $stage2Removed (Jaccard >= 0.85)" -ForegroundColor $(if ($stage2Removed -gt 0) { "Yellow" } else { "Green" })
-Write-Host "    LLM candidates: $($candidateClusters.Count) clusters ($($candidateClusters | ForEach-Object { $_.Count } | Measure-Object -Sum | Select-Object -ExpandProperty Sum) questions)" -ForegroundColor Cyan
+$llmQCount = ($candidateClusters | ForEach-Object { $_.Count } | Measure-Object -Sum).Sum
+if (-not $llmQCount) { $llmQCount = 0 }
+Write-Host "    Auto-merged: $stage2Removed (composite >= $CompositeAutoMerge)" -ForegroundColor $(if ($stage2Removed -gt 0) { "Yellow" } else { "Green" })
+Write-Host "    LLM candidates: $($candidateClusters.Count) clusters ($llmQCount questions)" -ForegroundColor Cyan
 
 # ══════════════════════════════════════════════════════════════════
 #  STAGE 3: LLM SEMANTIC MERGE (Copilot CLI on candidate clusters)
