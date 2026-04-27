@@ -100,7 +100,7 @@ function Measure-CodeDocumentation {
     $score += $setupScore
     $details['BuildTestDocs'] = "$setupScore/5 setup signals found"
 
-    # Entry points with doc comments (10pts)
+    # Entry points with doc comments OR matching .md doc files (10pts)
     $entryPointPatterns = @(
         '(?m)^\s*\[(Http(Get|Post|Put|Delete|Patch)|Route|ApiController)\]'   # C# controllers
         '(?m)^\s*(export\s+)?(async\s+)?function\s+\w+'                       # JS/TS
@@ -109,6 +109,13 @@ function Measure-CodeDocumentation {
         '(?m)^\s*(public|private|protected)\s+.*\s+\w+\s*\('                  # Java/C#
     )
     $docCommentPatterns = @('///\s*<summary>', '/\*\*', '"""', "'''", '///')
+
+    # Build index of doc files by keyword for matching source files to .md docs
+    $docIndex = @{}
+    foreach ($d in $DocFiles) {
+        $docBaseName = [IO.Path]::GetFileNameWithoutExtension($d).ToLower() -replace '[-_\s]', ''
+        $docIndex[$docBaseName] = $d
+    }
 
     $sampledFiles = @($SourceFiles | Sort-Object | Select-Object -First ([Math]::Min(50, $SourceFiles.Count)))
     $documented = 0; $total = 0
@@ -121,15 +128,33 @@ function Measure-CodeDocumentation {
         }
         if ($hasEntry) {
             $total++
+            $hasDoc = $false
+            # Check 1: inline doc comments (/// <summary>, /**, etc.)
             foreach ($dp in $docCommentPatterns) {
-                if ($content -match $dp) { $documented++; break }
+                if ($content -match $dp) { $hasDoc = $true; break }
             }
+            # Check 2: matching .md doc file exists (e.g., BackupController.cs → backupcontroller.md or backup-controller.md)
+            if (-not $hasDoc) {
+                $srcBaseName = [IO.Path]::GetFileNameWithoutExtension($f).ToLower() -replace '[-_\s]', ''
+                # Try exact match, controller-suffix match, and substring match
+                if ($docIndex.ContainsKey($srcBaseName)) {
+                    $hasDoc = $true
+                } else {
+                    # Check if any doc file name contains the source file's base name
+                    foreach ($dKey in $docIndex.Keys) {
+                        if ($dKey -match $srcBaseName -or $srcBaseName -match $dKey) {
+                            $hasDoc = $true; break
+                        }
+                    }
+                }
+            }
+            if ($hasDoc) { $documented++ }
         }
     }
     $docRatio = if ($total -gt 0) { $documented / $total } else { 0 }
     $entryPts = [Math]::Min(10, [Math]::Round($docRatio * 10))
     $score += $entryPts
-    $details['EntryPointDocs'] = "$documented/$total sampled files with doc comments ($entryPts/10 pts)"
+    $details['EntryPointDocs'] = "$documented/$total sampled entry points documented ($entryPts/10 pts)"
 
     return @{ Score = $score; Max = 20; Details = $details }
 }
@@ -146,6 +171,13 @@ function Measure-DocQuality {
 
     # Dead references — check file paths in docs (deduct up to 8pts, ratio-based)
     $cachedFiles = @{}; foreach ($f in $AllFiles) { $cachedFiles[$f] = $true }
+    # Also index by filename for loose matching (handles docs referencing files by name)
+    $fileNameIndex = @{}
+    foreach ($f in $AllFiles) {
+        $fn = [IO.Path]::GetFileName($f)
+        if ($fn) { $fileNameIndex[$fn] = $true }
+    }
+
     $deadRefs = 0; $checkedRefs = 0
     $sampledDocs = @($DocFiles | Sort-Object | Select-Object -First ([Math]::Min(30, $DocFiles.Count)))
     foreach ($doc in $sampledDocs) {
@@ -155,17 +187,35 @@ function Measure-DocQuality {
         foreach ($ref in $refs) {
             $checkedRefs++
             $refPath = $ref.Groups[1].Value -replace '#.*$', '' -replace '^\.\/', ''
+            if (-not $refPath -or $refPath -match '^mailto:') { continue }
+
             $docDir = [IO.Path]::GetDirectoryName($doc) -replace '\\', '/'
-            $resolved = if ($refPath -match '^\.\.') { "$docDir/$refPath" } else { $refPath }
+
+            # Resolve relative paths properly
+            $resolved = if ($refPath.StartsWith('.')) {
+                $combined = "$docDir/$refPath" -replace '\\', '/'
+                # Normalize ../  segments
+                $parts = $combined -split '/'
+                $stack = [System.Collections.Generic.List[string]]::new()
+                foreach ($p in $parts) {
+                    if ($p -eq '..') { if ($stack.Count -gt 0) { $stack.RemoveAt($stack.Count - 1) } }
+                    elseif ($p -ne '.' -and $p -ne '') { $stack.Add($p) }
+                }
+                $stack -join '/'
+            } else { $refPath }
             $resolved = $resolved -replace '\\', '/'
-            if (-not $cachedFiles.ContainsKey($resolved) -and -not $cachedFiles.ContainsKey($refPath)) {
-                $deadRefs++
-            }
+
+            # Check: exact path, resolved path, or filename match
+            $found = $cachedFiles.ContainsKey($resolved) -or
+                     $cachedFiles.ContainsKey($refPath) -or
+                     $fileNameIndex.ContainsKey([IO.Path]::GetFileName($refPath))
+
+            if (-not $found) { $deadRefs++ }
             if ($checkedRefs -ge 200) { break }
         }
         if ($checkedRefs -ge 200) { break }
     }
-    # Proportional: deduct based on dead/total ratio (not absolute count)
+    # Proportional: deduct based on dead/total ratio
     $deadRatio = if ($checkedRefs -gt 0) { $deadRefs / $checkedRefs } else { 0 }
     $deadDeduct = [Math]::Min(8, [Math]::Round($deadRatio * 16))  # 50% dead = -8pts
     $score -= $deadDeduct
@@ -199,16 +249,22 @@ function Measure-DocQuality {
 
     # Navigation / Index quality (deduct up to 5pts)
     $navSignals = 0
+    # Check for index/registry files
     $indexFiles = @($AllFiles | Where-Object { $_ -match '(docs/.*index|docs/.*README|table.of.contents|TOC\.md|SUMMARY\.md|doc_registry)' })
     if ($indexFiles.Count -gt 0) { $navSignals++ }
+    # Count README.md files inside doc subdirectories (folder-level navigation)
+    $folderReadmes = @($DocFiles | Where-Object { $_ -match '/README\.md$' -and $_ -match '(docs|copilot-docs|agentKT|workflows|adr|knowledge)' })
+    if ($folderReadmes.Count -ge 3) { $navSignals += 2 }  # Strong folder nav
+    elseif ($folderReadmes.Count -ge 1) { $navSignals++ }  # Some folder nav
+    # Check root README links to docs
     if ($readme = $AllFiles | Where-Object { $_ -match '^README\.(md|rst)$' } | Select-Object -First 1) {
         $content = Get-FileContent -RepoPath $RepoPath -RelPath $readme
-        if ($content -match '\[.*\]\(docs/') { $navSignals++ }  # Links to docs
+        if ($content -match '\[.*\]\(docs/') { $navSignals++ }
         if ($content -match '#{2,}.*table of contents|#{2,}.*documentation' ) { $navSignals++ }
     }
     $navDeduct = [Math]::Max(0, 5 - ($navSignals * 2))
     $score -= $navDeduct
-    $details['Navigation'] = "$navSignals navigation signals (-$navDeduct pts)"
+    $details['Navigation'] = "$navSignals navigation signals ($folderReadmes.Count folder READMEs) (-$navDeduct pts)"
 
     $score = [Math]::Max(0, $score)
     return @{ Score = $score; Max = 20; Details = $details }
