@@ -1502,6 +1502,13 @@ function Invoke-MonkeyQuestions {
             $batchNum = 0
             $processedQ = $completedIds.Count
 
+            # ── Circuit breaker + mid-run auto-commit state ──
+            $consecutiveFailures = 0
+            $maxConsecutiveFailures = 3
+            $autoCommitInterval = 10
+            $batchesSinceCommit = 0
+            $circuitBreakerTripped = $false
+
             foreach ($batch in $batches) {
                 $batchNum++
                 $processedQ += $batch.Count
@@ -1525,6 +1532,7 @@ function Invoke-MonkeyQuestions {
 
                 $stats.BatchesRun++
                 $stats.Retries += $batchResult.Retries
+                $batchesSinceCommit++
 
                 # File changes at batch level
                 $afterStatus = & git --no-pager status --porcelain 2>&1
@@ -1533,7 +1541,37 @@ function Invoke-MonkeyQuestions {
                 if ($batchResult.Status -eq "FAILED") {
                     # Entire batch failed — fall back to single-question mode for this batch
                     $stats.BatchesFailed++
-                    Write-Step "Batch $batchNum failed — falling back to single mode for $($batch.Count) questions" "WARN"
+                    $consecutiveFailures++
+                    Write-Step "Batch $batchNum failed ($consecutiveFailures consecutive) — falling back to single mode for $($batch.Count) questions" "WARN"
+
+                    # ── Circuit breaker: N consecutive full failures ──
+                    if ($consecutiveFailures -ge $maxConsecutiveFailures) {
+                        Write-Step "⚡ CIRCUIT BREAKER: $consecutiveFailures consecutive batch failures — auto-committing to reduce context" "ERROR"
+                        $uncommittedCount = @(& git --no-pager status --porcelain 2>&1).Count
+                        if ($uncommittedCount -gt 0) {
+                            & git add -A 2>&1 | Out-Null
+                            $outputDirRel = $OutputPath.Replace($WorkingDirectory, "").TrimStart("\", "/")
+                            & git reset -- $outputDirRel 2>&1 | Out-Null
+                            $stagedCount = @(& git --no-pager diff --cached --name-only 2>&1).Count
+                            if ($stagedCount -gt 0) {
+                                $cbMsg = "docs: mid-run auto-commit ($stagedCount files) — circuit breaker at batch $batchNum`n`nCircuit breaker triggered after $consecutiveFailures consecutive batch failures.`nCheckpoint: $($completedIds.Count) questions completed.`n`nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+                                & git commit -m $cbMsg 2>&1 | Out-Null
+                                Write-Step "Auto-committed $stagedCount files to reduce working tree" "OK"
+                                $batchesSinceCommit = 0
+                            }
+                        }
+
+                        # Reset and give one more chance
+                        if (-not $circuitBreakerTripped) {
+                            $circuitBreakerTripped = $true
+                            $consecutiveFailures = 0
+                            Write-Step "Circuit breaker reset — retrying with clean working tree" "INFO"
+                        } else {
+                            Write-Step "⛔ Circuit breaker tripped TWICE — skipping remaining batches for this monkey" "ERROR"
+                            $stats['CircuitBreakerSkipped'] = $totalQ - ($completedIds.Count - $alreadyDone)
+                            break
+                        }
+                    }
 
                     foreach ($q in $batch) {
                         $stats.FallbackSingles++
@@ -1542,6 +1580,27 @@ function Invoke-MonkeyQuestions {
                     }
                     Save-BatchCheckpoint -OutputPath $OutputPath -CompletedIds $completedIds
                     continue
+                }
+
+                # Batch succeeded (COMPLETE or PARTIAL) — reset circuit breaker
+                $consecutiveFailures = 0
+
+                # ── Mid-run auto-commit: every N batches, commit to keep working tree small ──
+                if ($batchesSinceCommit -ge $autoCommitInterval) {
+                    $uncommittedCount = @(& git --no-pager status --porcelain 2>&1).Count
+                    if ($uncommittedCount -gt 50) {
+                        Write-Step "Mid-run auto-commit: $uncommittedCount uncommitted files after $batchesSinceCommit batches" "INFO"
+                        & git add -A 2>&1 | Out-Null
+                        $outputDirRel = $OutputPath.Replace($WorkingDirectory, "").TrimStart("\", "/")
+                        & git reset -- $outputDirRel 2>&1 | Out-Null
+                        $stagedCount = @(& git --no-pager diff --cached --name-only 2>&1).Count
+                        if ($stagedCount -gt 0) {
+                            $midMsg = "docs: mid-run auto-commit ($stagedCount files) — batch $batchNum/$($batches.Count)`n`nAuto-committed to keep working tree small during batch execution.`nCheckpoint: $($completedIds.Count) questions completed.`n`nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+                            & git commit -m $midMsg 2>&1 | Out-Null
+                            Write-Step "Mid-run committed $stagedCount files" "OK"
+                            $batchesSinceCommit = 0
+                        }
+                    }
                 }
 
                 # Process each question result from the batch
@@ -1639,7 +1698,8 @@ function Invoke-MonkeyQuestions {
 
     # Batch summary
     if ($useBatch) {
-        Write-Step "Batch summary: $($stats.BatchesRun) batches, $($stats.BatchesFailed) failed, $($stats.FallbackSingles) fallback singles" "INFO"
+        $cbInfo = if ($stats.ContainsKey('CircuitBreakerSkipped') -and $stats.CircuitBreakerSkipped -gt 0) { ", $($stats.CircuitBreakerSkipped) skipped (circuit breaker)" } else { "" }
+        Write-Step "Batch summary: $($stats.BatchesRun) batches, $($stats.BatchesFailed) failed, $($stats.FallbackSingles) fallback singles${cbInfo}" "INFO"
     }
 
     return $stats
