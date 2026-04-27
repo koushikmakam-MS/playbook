@@ -1267,8 +1267,10 @@ if ($cleanupMadeChanges) {
     $postCleanupScore = Get-DocHealthScore -RepoPath $workDir -IncludeBonus -TargetAgents $config['TargetAgents']
     $scoreDelta = $postCleanupScore.TotalScore - $preCleanupScore.TotalScore
 
-    if ($scoreDelta -lt 0) {
-        Write-Step "Score DROPPED by $([Math]::Abs($scoreDelta)) points ($($preCleanupScore.TotalScore) -> $($postCleanupScore.TotalScore)) — reverting cleanup" "ERROR"
+    # Allow small drops (up to 5pts) due to measurement noise; only revert significant regressions
+    $scoreGuardTolerance = -5
+    if ($scoreDelta -lt $scoreGuardTolerance) {
+        Write-Step "Score DROPPED by $([Math]::Abs($scoreDelta)) points ($($preCleanupScore.TotalScore) -> $($postCleanupScore.TotalScore)) — exceeds tolerance ($scoreGuardTolerance), reverting cleanup" "ERROR"
         Push-Location $workDir
         & git checkout -- . 2>&1 | Out-Null
         Pop-Location

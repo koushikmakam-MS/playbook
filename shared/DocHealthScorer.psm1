@@ -110,7 +110,7 @@ function Measure-CodeDocumentation {
     )
     $docCommentPatterns = @('///\s*<summary>', '/\*\*', '"""', "'''", '///')
 
-    $sampledFiles = @($SourceFiles | Get-Random -Count ([Math]::Min(50, $SourceFiles.Count)) -ErrorAction SilentlyContinue)
+    $sampledFiles = @($SourceFiles | Sort-Object | Select-Object -First ([Math]::Min(50, $SourceFiles.Count)))
     $documented = 0; $total = 0
     foreach ($f in $sampledFiles) {
         $content = Get-FileContent -RepoPath $RepoPath -RelPath $f
@@ -147,7 +147,7 @@ function Measure-DocQuality {
     # Dead references — check file paths in docs (deduct up to 8pts)
     $cachedFiles = @{}; foreach ($f in $AllFiles) { $cachedFiles[$f] = $true }
     $deadRefs = 0; $checkedRefs = 0
-    $sampledDocs = @($DocFiles | Get-Random -Count ([Math]::Min(30, $DocFiles.Count)) -ErrorAction SilentlyContinue)
+    $sampledDocs = @($DocFiles | Sort-Object | Select-Object -First ([Math]::Min(30, $DocFiles.Count)))
     foreach ($doc in $sampledDocs) {
         $content = Get-FileContent -RepoPath $RepoPath -RelPath $doc
         if (-not $content) { continue }
@@ -359,7 +359,7 @@ function Measure-RiskSignals {
     $score = 20
     $details = @{}
 
-    $sampled = @($SourceFiles | Get-Random -Count ([Math]::Min(40, $SourceFiles.Count)) -ErrorAction SilentlyContinue)
+    $sampled = @($SourceFiles | Sort-Object | Select-Object -First ([Math]::Min(40, $SourceFiles.Count)))
     $secretCount = 0; $emptyCatchCount = 0; $todoCount = 0
 
     foreach ($f in $sampled) {
