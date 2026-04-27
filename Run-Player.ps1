@@ -948,22 +948,24 @@ Write-Step "Preflight: sampling docs to decide what cleanup is needed..." "INFO"
 $preCleanupScore = Get-DocHealthScore -RepoPath $workDir -IncludeBonus -TargetAgents $config['TargetAgents']
 Write-Step "Pre-cleanup score: $($preCleanupScore.TotalScore)/$($preCleanupScore.MaxScore) ($($preCleanupScore.Grade))" "INFO"
 
-# Collect doc files created/modified in this run (scoped cleanup — only touch what we generated)
+# Collect .md files in agent doc folders that differ from base branch (scoped cleanup)
 Push-Location $workDir
 $baseBranch = if ($config['BaseBranch']) { $config['BaseBranch'] } else { 'main' }
+$agentDocPaths = @('docs/knowledge', 'copilot-docs')
 $runMdFiles = @()
-# New + modified .md files vs base branch
-$diffOutput = @(& git --no-pager diff --name-only --diff-filter=AM "$baseBranch" -- '*.md' 2>&1 | Where-Object { $_ -and $_ -notmatch '^fatal' })
-# Also include uncommitted .md files
-$statusOutput = @(& git --no-pager status --porcelain -- '*.md' 2>&1 | Where-Object { $_ } | ForEach-Object { ($_ -replace '^\s*\?\?\s*|^\s*[MADRCU]+\s*', '').Trim('"') })
-$allRunPaths = @($diffOutput + $statusOutput | Sort-Object -Unique | Where-Object { $_ })
-foreach ($relPath in $allRunPaths) {
-    $fullPath = Join-Path $workDir $relPath
-    if (Test-Path $fullPath) { $runMdFiles += Get-Item $fullPath }
+foreach ($docPath in $agentDocPaths) {
+    # Committed .md files that differ from base
+    $diffOutput = @(& git --no-pager diff --name-only --diff-filter=AM "$baseBranch" -- "$docPath/*.md" "$docPath/**/*.md" 2>&1 | Where-Object { $_ -and $_ -notmatch '^fatal' })
+    # Uncommitted .md files in agent folders
+    $statusOutput = @(& git --no-pager status --porcelain -- "$docPath" 2>&1 | Where-Object { $_ -match '\.md"?\s*$' } | ForEach-Object { ($_ -replace '^\s*\?\?\s*|^\s*[MADRCU]+\s*', '').Trim('"') })
+    foreach ($relPath in @($diffOutput + $statusOutput | Sort-Object -Unique | Where-Object { $_ })) {
+        $fullPath = Join-Path $workDir $relPath
+        if (Test-Path $fullPath) { $runMdFiles += Get-Item $fullPath }
+    }
 }
 Pop-Location
 $allDocs = @($runMdFiles | Sort-Object FullName -Unique)
-Write-Step "Scoped to $($allDocs.Count) .md files created/modified in this run (vs $baseBranch)" "INFO"
+Write-Step "Scoped to $($allDocs.Count) .md files in agent folders diffed from $baseBranch" "INFO"
 
 # Signal 1: Duplication rate (sample 40 random docs, pairwise Jaccard)
 $dupRate = 0
