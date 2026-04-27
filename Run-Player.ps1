@@ -948,17 +948,22 @@ Write-Step "Preflight: sampling docs to decide what cleanup is needed..." "INFO"
 $preCleanupScore = Get-DocHealthScore -RepoPath $workDir -IncludeBonus -TargetAgents $config['TargetAgents']
 Write-Step "Pre-cleanup score: $($preCleanupScore.TotalScore)/$($preCleanupScore.MaxScore) ($($preCleanupScore.Grade))" "INFO"
 
-# Collect all doc files once (used by preflight + cleanup steps)
-$allDocDirs = @()
-if (Test-Path (Join-Path $workDir "docs")) { $allDocDirs += Get-ChildItem (Join-Path $workDir "docs") -Directory -Recurse | Where-Object { $_.Name -notmatch '^\.' } }
-if (Test-Path (Join-Path $workDir "copilot-docs")) { $allDocDirs += Get-ChildItem (Join-Path $workDir "copilot-docs") -Directory -Recurse | Where-Object { $_.Name -notmatch '^\.' } }
-$allDocs = @()
-foreach ($dir in $allDocDirs) { $allDocs += Get-ChildItem $dir.FullName -Filter "*.md" -File -ErrorAction SilentlyContinue }
-foreach ($rootDocDir in @("docs", "copilot-docs")) {
-    $rootPath = Join-Path $workDir $rootDocDir
-    if (Test-Path $rootPath) { $allDocs += Get-ChildItem $rootPath -Filter "*.md" -File -ErrorAction SilentlyContinue }
+# Collect doc files created/modified in this run (scoped cleanup — only touch what we generated)
+Push-Location $workDir
+$baseBranch = if ($config['BaseBranch']) { $config['BaseBranch'] } else { 'main' }
+$runMdFiles = @()
+# New + modified .md files vs base branch
+$diffOutput = @(& git --no-pager diff --name-only --diff-filter=AM "$baseBranch" -- '*.md' 2>&1 | Where-Object { $_ -and $_ -notmatch '^fatal' })
+# Also include uncommitted .md files
+$statusOutput = @(& git --no-pager status --porcelain -- '*.md' 2>&1 | Where-Object { $_ } | ForEach-Object { ($_ -replace '^\s*\?\?\s*|^\s*[MADRCU]+\s*', '').Trim('"') })
+$allRunPaths = @($diffOutput + $statusOutput | Sort-Object -Unique | Where-Object { $_ })
+foreach ($relPath in $allRunPaths) {
+    $fullPath = Join-Path $workDir $relPath
+    if (Test-Path $fullPath) { $runMdFiles += Get-Item $fullPath }
 }
-$allDocs = @($allDocs | Sort-Object FullName -Unique)
+Pop-Location
+$allDocs = @($runMdFiles | Sort-Object FullName -Unique)
+Write-Step "Scoped to $($allDocs.Count) .md files created/modified in this run (vs $baseBranch)" "INFO"
 
 # Signal 1: Duplication rate (sample 40 random docs, pairwise Jaccard)
 $dupRate = 0
