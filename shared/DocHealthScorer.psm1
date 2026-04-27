@@ -574,8 +574,8 @@ function Show-ScoreDelta {
         Displays a before/after comparison of two Doc Health Score results.
     #>
     param(
-        [Parameter(Mandatory)][hashtable]$Before,
-        [Parameter(Mandatory)][hashtable]$After
+        [Parameter(Mandatory)]$Before,
+        [Parameter(Mandatory)]$After
     )
 
     Write-Host ""
