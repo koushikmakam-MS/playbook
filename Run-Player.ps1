@@ -249,6 +249,10 @@ if ($earlyRepoPath -and -not $CleanStart) {
                 $config['BranchName'] = $cpBranch
                 if (-not $Resume) { $Resume = $true }
                 $NonInteractive = $true
+                # Restore TargetAgents from checkpoint so scoring stays scoped
+                if ($earlyCp.targetAgents) {
+                    $configParams['TargetAgents'] = @($earlyCp.targetAgents)
+                }
                 Write-Step "Branch (checkpoint): $cpBranch" "OK"
             }
         }
@@ -418,14 +422,15 @@ if ($existingCheckpoint) {
 
 # ── Initialize checkpoint for this run ────────────────────────────
 $runCheckpoint = @{
-    startedAt   = (Get-Date).ToString('o')
-    model       = $selectedModel
-    pack        = $config.Pack
-    batchSize   = $BatchSize
-    branch      = $branchName
-    repoPath    = $workDir
-    beforeScore = $beforeScore
-    monkeys     = @{}
+    startedAt    = (Get-Date).ToString('o')
+    model        = $selectedModel
+    pack         = $config.Pack
+    batchSize    = $BatchSize
+    branch       = $branchName
+    repoPath     = $workDir
+    targetAgents = $config['TargetAgents']
+    beforeScore  = $beforeScore
+    monkeys      = @{}
 }
 
 # Pre-populate monkey states
