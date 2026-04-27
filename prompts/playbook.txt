@@ -879,15 +879,11 @@ Prompt:
   RULES for the doc-first gate:
   - Place at TOP of SKILL.md, not at the bottom
   - Include workflow doc lookup instruction ("find in {DOCS_ROOT}/workflows/")
-  - Include "How to use the workflow doc" with specific section references:
-    * For coding skills: "§11 Dependency DAG shows the class dependency chain —
-      use it to understand which classes to touch, what interfaces to inject,
-      and do not add a dependency that bypasses a layer shown in the DAG.
-      §5 Sequence Diagram shows runtime call flow. §10 Error Scenarios lists
-      known error codes — reuse them."
-    * For test skills: "§11 Dependency DAG shows which interfaces to mock.
-      §10 Error Scenarios lists error codes — write a negative test for each.
-      §4 Request/Response Flow shows branching logic to cover."
+  - Include "Why this matters" explanation
+  - For test skills: add that workflow doc's "Error Scenarios" and
+    "Request/Response Flow" tell you exactly what to test
+  - For coding skills: add that workflow doc shows the call chain and
+    config dependencies
   - Utility/styling skills (e.g. `concise`) do NOT need a doc-first gate
 
   Reference: `azure-devops-pr-review` skill is the gold standard for
