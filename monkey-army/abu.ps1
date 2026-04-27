@@ -464,11 +464,11 @@ function New-GapQuestions {
         $gapDescriptions = @()
         foreach ($gap in $batch) {
             if ($gap.Type -eq "UNDOCUMENTED_CODE") {
-                $gapDescriptions += "- FILE: `"$($gap.Target)`" — UNDOCUMENTED. Generate $QuestionsPerGap questions covering the standard workflow doc sections: Overview, Trigger Points, API Endpoints, Request/Response Flow, Sequence Diagram (mermaid required), Key Source Files, Configuration, Telemetry, Debug, Error Scenarios, Dependency DAG (mermaid graph TD required)."
+                $gapDescriptions += "- FILE: `"$($gap.Target)`" — UNDOCUMENTED. Generate $QuestionsPerGap questions covering the standard workflow doc sections: Overview, Trigger Points, API Endpoints, Request/Response Flow, Sequence Diagram (mermaid required), Key Source Files, Configuration, Telemetry, Debug, Error Scenarios."
             }
             elseif ($gap.Type -eq "INCOMPLETE_DOC") {
                 $missingSections = $gap.MissingSections -join ", "
-                $gapDescriptions += "- DOC: `"$($gap.Target)`" — INCOMPLETE, missing: $missingSections. Generate $QuestionsPerGap questions targeting those missing sections. If Mermaid Diagram or Dependency DAG is missing, ask about creating those diagrams."
+                $gapDescriptions += "- DOC: `"$($gap.Target)`" — INCOMPLETE, missing: $missingSections. Generate $QuestionsPerGap questions targeting those missing sections. If Mermaid Diagram is missing, ask about creating a sequence diagram."
             }
         }
         $gapList = $gapDescriptions -join "`n"
