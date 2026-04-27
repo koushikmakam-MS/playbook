@@ -25,6 +25,7 @@ $script:PrimaryWorkflowSections = @(
     @{ Number = 3;  Pattern = '##\s*3\.\s*(API\s*Endpoints|Key\s*Workers|Sequence)'; Name = 'API Endpoints / Key Workers' }
     @{ Number = 4;  Pattern = '##\s*4\.\s*(Request|Response|Flow)';     Name = 'Request/Response Flow' }
     @{ Number = 5;  Pattern = '##\s*5\.\s*Sequence\s*Diagram';         Name = 'Sequence Diagram' }
+    @{ Number = 51; Pattern = '```mermaid';                             Name = 'Mermaid Diagram (in any section)'; Optional = $false }
     @{ Number = 6;  Pattern = '##\s*6\.\s*Key\s*Source\s*Files';       Name = 'Key Source Files' }
     @{ Number = 7;  Pattern = '##\s*7\.\s*Configuration';              Name = 'Configuration Dependencies' }
     @{ Number = 8;  Pattern = '##\s*8\.\s*Telemetry';                  Name = 'Telemetry & Logging' }
@@ -360,20 +361,52 @@ Base all content on actual source code analysis — do not fabricate.
         elseif ($result.Status -eq 'PARTIAL') {
             # Doc exists but missing sections
             foreach ($missing in $result.MissingSections) {
-                $queue += [PSCustomObject]@{
-                    Priority    = $priority
-                    Type        = 'ADD_SECTION'
-                    Domain      = $result.DomainName
-                    TargetFile  = $result.DocRelativePath
-                    SectionName = $missing.Name
-                    SectionNum  = $missing.Number
-                    Prompt      = @"
+                $isMermaid = $missing.Name -match 'Mermaid'
+                $sectionPrompt = if ($isMermaid) {
+                    @"
+In the file '$($result.DocRelativePath)', add a Mermaid sequence diagram in the '## 5. Sequence Diagram' section (or create the section if missing).
+
+The diagram MUST follow these rules from the Playbook standard:
+- Use REAL method names from source code (not generic "process request")
+- Show decision points with alt/opt blocks for branching logic
+- Include error paths (catch blocks, fallbacks) as alt branches
+- Show config checks that change flow direction
+- Minimum 4 participants for any cross-layer flow
+- For complex flows, split into multiple diagrams (happy path + error path)
+
+Example format:
+``````mermaid
+sequenceDiagram
+  participant Client
+  participant Controller
+  participant BL as Business Logic
+  participant Impl as Implementation
+  Client->>Controller: HTTP verb /route
+  Controller->>BL: RealMethodName()
+  BL->>Impl: ActualImplementation()
+  Impl-->>BL: Response
+``````
+
+Analyze the actual source code for the '$($result.DomainName)' domain to build an accurate diagram.
+"@
+                } else {
+                    @"
 In the file '$($result.DocRelativePath)', add the missing section '## $($missing.Number). $($missing.Name)'.
 
 This section should follow the same depth and format as other sections in the document.
 Place it in numerical order relative to existing sections.
 Base all content on actual source code analysis of the '$($result.DomainName)' domain — do not fabricate.
 "@
+                }
+
+                $queue += [PSCustomObject]@{
+                    Priority    = $priority
+                    Type        = if ($isMermaid) { 'ADD_MERMAID' } else { 'ADD_SECTION' }
+                    Domain      = $result.DomainName
+                    TargetFile  = $result.DocRelativePath
+                    SectionName = $missing.Name
+                    SectionNum  = $missing.Number
+                    Prompt      = $sectionPrompt
                 }
             }
 
