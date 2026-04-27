@@ -433,8 +433,43 @@ function Start-Marcel {
             }
         }
 
-        # Phase 2: Discovery — find stale docs
-        $docAnalysis = Invoke-Discovery -WorkDir $workDir
+        # Phase 2: Discovery — find stale docs (with checkpoint caching)
+        $discoveryCheckpointPath = Join-Path $script:OutputPath "discovery.json"
+        $questionCheckpointExists = (Get-QuestionCheckpoint -OutputPath $script:OutputPath) -and
+            ((Get-QuestionCheckpoint -OutputPath $script:OutputPath).Count -gt 0)
+
+        if ((Test-Path $discoveryCheckpointPath) -and (-not $GenOnly)) {
+            # Load cached discovery results — skip the expensive scan
+            try {
+                $cachedDiscovery = Get-Content $discoveryCheckpointPath -Raw | ConvertFrom-Json
+                $docAnalysis = @($cachedDiscovery | ForEach-Object {
+                    @{
+                        DocFile      = $_.DocFile
+                        TotalRefs    = [int]$_.TotalRefs
+                        AliveRefs    = [int]$_.AliveRefs
+                        DeadRefs     = [int]$_.DeadRefs
+                        StalenessPct = [double]$_.StalenessPct
+                        DeadRefList  = @($_.DeadRefList | ForEach-Object { @{ Ref = $_.Ref; Type = $_.Type } })
+                    }
+                })
+                Write-Phase "PHASE 2" "Discovery — Loading cached results"
+                Write-Step "Loaded discovery cache: $($docAnalysis.Count) stale docs from previous scan" "OK"
+            }
+            catch {
+                Write-Step "Discovery cache corrupted — re-scanning" "WARN"
+                $docAnalysis = Invoke-Discovery -WorkDir $workDir
+            }
+        }
+        elseif ($questionCheckpointExists -and (-not $GenOnly)) {
+            # Questions already exist and no discovery cache — skip discovery entirely
+            # Discovery is only needed for question gen; if questions are cached, it's redundant
+            Write-Phase "PHASE 2" "Discovery — Skipped (question checkpoint exists)"
+            Write-Step "Question checkpoint found — skipping discovery scan entirely" "OK"
+            $docAnalysis = @()
+        }
+        else {
+            $docAnalysis = Invoke-Discovery -WorkDir $workDir
+        }
 
         # Incremental filter
         if ($Incremental -or $Since) {
