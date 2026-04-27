@@ -796,6 +796,39 @@ Prompt:
   the missing capability as a new section in the existing skill and
   update its YAML description to include the new trigger keywords.
 
+  🛑 DOC-FIRST GATE STANDARD — EVERY skill that triggers code changes
+  or test creation MUST include a "BEFORE IMPLEMENTING" section at the
+  TOP (immediately after YAML frontmatter and TL;DR), BEFORE "When To Use":
+
+  ```markdown
+  ## 🛑 BEFORE IMPLEMENTING — READ THESE FIRST
+
+  **STOP.** Before writing any code/tests, you MUST read these docs:
+
+  | Step | File | Why |
+  |------|------|-----|
+  | 1 | The **workflow doc** for the feature (find in `{DOCS_ROOT}/workflows/`) | Understand the data flow, error scenarios, config keys |
+  | 2 | `{DOCS_ROOT}/Architecture_Memory.md` | Layer boundaries and patterns |
+  | 3 | `{DOCS_ROOT}/exemplars/Code_Exemplars.md` | Verified copy-paste patterns |
+
+  > **Why this matters:** Code/tests written without reading the workflow
+  > doc miss domain-specific patterns, use wrong error codes, and don't
+  > cover actual branching logic.
+  ```
+
+  RULES for the doc-first gate:
+  - Place at TOP of SKILL.md, not at the bottom
+  - Include workflow doc lookup instruction ("find in {DOCS_ROOT}/workflows/")
+  - Include "Why this matters" explanation
+  - For test skills: add that workflow doc's "Error Scenarios" and
+    "Request/Response Flow" tell you exactly what to test
+  - For coding skills: add that workflow doc shows the call chain and
+    config dependencies
+  - Utility/styling skills (e.g. `concise`) do NOT need a doc-first gate
+
+  Reference: `azure-devops-pr-review` skill is the gold standard for
+  doc-first enforcement with 🛑 STOP + checkpoint pattern.
+
   Cross-reference {DOCS_ROOT} docs. Update .github/copilot-instructions.md
   with skill list and # triggers.
 
