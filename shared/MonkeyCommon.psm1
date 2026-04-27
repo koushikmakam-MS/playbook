@@ -618,7 +618,7 @@ function Invoke-CopilotBatch {
 
 --- QUESTION [$batchId-$idx] ---
 $($q.Question)${ep}
-If relevant documentation for this topic is missing or incomplete in the repo, create or update it${docDirHint} following existing doc patterns.
+If you identify a genuine documentation gap for this topic (missing, outdated, or incomplete), create or update the relevant doc${docDirHint} following existing doc patterns. If existing docs already cover this adequately, just answer the question — do not create redundant files.
 
 "@
     }
@@ -634,7 +634,7 @@ If relevant documentation for this topic is missing or incomplete in the repo, c
         $fileContent = @"
 # Batch $batchId — $($Questions.Count) Questions
 
-Answer each question below about this codebase and update or add relevant docs${docDirHint}.
+Answer each question below about this codebase. If you identify a genuine doc gap (missing, outdated, or incomplete), create or update the relevant doc${docDirHint}. Do not create redundant files if existing docs already cover the topic.
 Before each answer, output:
 >>> ANSWER [$batchId-<N>] <<<
 After your last answer, output:
@@ -654,9 +654,9 @@ Read the questions file at ``$relBatchPath`` and answer all $($Questions.Count) 
 IMPORTANT formatting rules:
 - Before each answer, output exactly: >>> ANSWER [$batchId-N] <<< (where N is the question number)
 - After your last answer, output: >>> BATCH DONE [$batchId] <<<
-- Answer each question AND update or add relevant docs${docDirHint} following existing doc patterns.
+- If you identify a genuine doc gap, create or update the relevant doc${docDirHint} following existing doc patterns. Do not create redundant files.
 
-Start now — read the file, answer all questions, and create or update documentation.
+Start now — read the file and answer all questions. If you identify genuine doc gaps, create or update relevant docs. Do not create redundant files.
 "@
         $modeLabel = "file"
     }
