@@ -124,10 +124,27 @@ Then RUN the autonomous loop — no more human interaction needed:
     Actions: "Add to [existing doc]" or "Create new: [suggested name]"
 
   STEP 4 — CREATE NEW DOCS (if auto-fix = yes):
-  - For each "Create new" action: create a workflow doc using the
-    14-section template from SKILL.md. Read the controller source
-    AND its BL layer (follow the call chain 2+ levels deep).
-    Fill in REAL data — no placeholders.
+  - For each "Create new" action: create a workflow doc with these
+    REQUIRED sections in this exact order:
+
+    ## Related Docs
+    ## 1. Overview
+    ## 2. Trigger Points (or "Key Components" for background workers)
+    ## 3. API Endpoints (or "Key Workers" for background workers)
+    ## 4. Request/Response Flow
+    ## 5. Sequence Diagram
+       ← MUST include a ```mermaid sequenceDiagram block here.
+       Rules: use REAL method names, minimum 4 participants,
+       show alt/opt blocks for branching, include error paths.
+    ## 6. Key Source Files
+    ## 7. Configuration Dependencies
+    ## 8. Telemetry & Logging
+    ## 9. How to Debug
+    ## 10. Error Scenarios
+
+    Read the controller source AND its BL layer (follow the call
+    chain 2+ levels deep). Fill in REAL data — no placeholders.
+    Every doc MUST have at least one mermaid sequence diagram.
   - For each "Add to" action: read the controller, then add a new
     section to the existing doc covering that controller's APIs,
     flow, config, errors.

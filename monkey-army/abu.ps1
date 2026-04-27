@@ -150,14 +150,17 @@ $script:DOC_PATTERNS = @(
 
 # Sections that well-documented code should have
 $script:EXPECTED_SECTIONS = @(
-    @{ Name = "Overview/Summary";     Patterns = @('overview', 'summary', 'introduction', 'about', '# \w') }
-    @{ Name = "Architecture/Design";  Patterns = @('architect', 'design', 'structure', 'diagram', 'flow') }
-    @{ Name = "API/Endpoints";        Patterns = @('api', 'endpoint', 'route', 'request', 'response') }
-    @{ Name = "Error Handling";       Patterns = @('error', 'exception', 'fault', 'failure', 'retry') }
-    @{ Name = "Configuration";        Patterns = @('config', 'setting', 'parameter', 'environment') }
-    @{ Name = "Dependencies";         Patterns = @('depend', 'prerequisite', 'require', 'import') }
-    @{ Name = "Testing";              Patterns = @('test', 'coverage', 'unit test', 'integration') }
-    @{ Name = "Security";             Patterns = @('security', 'auth', 'permission', 'rbac', 'credential') }
+    @{ Name = "1. Overview";                  Patterns = @('##\s*1\.\s*Overview', 'overview', 'summary', 'introduction') }
+    @{ Name = "2. Trigger Points";            Patterns = @('##\s*2\.\s*(Trigger|Key\s*Components)', 'trigger', 'entry\s*point') }
+    @{ Name = "3. API Endpoints";             Patterns = @('##\s*3\.\s*(API|Key\s*Workers)', 'api', 'endpoint', 'route') }
+    @{ Name = "4. Request/Response Flow";     Patterns = @('##\s*4\.\s*(Request|Response|Flow)', 'request.*flow', 'response.*flow') }
+    @{ Name = "5. Sequence Diagram";          Patterns = @('##\s*5\.\s*Sequence', 'sequence\s*diagram') }
+    @{ Name = "Mermaid Diagram";              Patterns = @('```mermaid') }
+    @{ Name = "6. Key Source Files";          Patterns = @('##\s*6\.\s*Key\s*Source', 'source\s*file', 'key\s*file') }
+    @{ Name = "7. Configuration";             Patterns = @('##\s*7\.\s*Config', 'config', 'setting') }
+    @{ Name = "8. Telemetry & Logging";       Patterns = @('##\s*8\.\s*Telemetry', 'telemetry', 'logging', 'tracing') }
+    @{ Name = "9. How to Debug";              Patterns = @('##\s*9\.\s*(How\s*to\s*Debug|Debug)', 'debug', 'troubleshoot') }
+    @{ Name = "10. Error Scenarios";          Patterns = @('##\s*10\.\s*Error', 'error.*scenario', 'error.*handling') }
 )
 
 # Code file patterns (entry points to cross-reference against docs)
@@ -459,11 +462,11 @@ function New-GapQuestions {
         $gapDescriptions = @()
         foreach ($gap in $batch) {
             if ($gap.Type -eq "UNDOCUMENTED_CODE") {
-                $gapDescriptions += "- FILE: `"$($gap.Target)`" — UNDOCUMENTED. Generate $QuestionsPerGap questions covering: purpose, architecture, APIs, error handling, config, testing."
+                $gapDescriptions += "- FILE: `"$($gap.Target)`" — UNDOCUMENTED. Generate $QuestionsPerGap questions covering the standard workflow doc sections: Overview, Trigger Points, API Endpoints, Request/Response Flow, Sequence Diagram (mermaid required), Key Source Files, Configuration, Telemetry, Debug, Error Scenarios."
             }
             elseif ($gap.Type -eq "INCOMPLETE_DOC") {
                 $missingSections = $gap.MissingSections -join ", "
-                $gapDescriptions += "- DOC: `"$($gap.Target)`" — INCOMPLETE, missing: $missingSections. Generate $QuestionsPerGap questions targeting those missing sections."
+                $gapDescriptions += "- DOC: `"$($gap.Target)`" — INCOMPLETE, missing: $missingSections. Generate $QuestionsPerGap questions targeting those missing sections. If Mermaid Diagram is missing, ask about creating a sequence diagram."
             }
         }
         $gapList = $gapDescriptions -join "`n"
@@ -640,8 +643,11 @@ function New-SingleGapQuestions {
     $genPrompt = ""
     if ($Gap.Type -eq "UNDOCUMENTED_CODE") {
         $genPrompt = @"
-The file '$($Gap.Target)' has NO documentation. Generate exactly $QuestionsPerGap questions that would produce complete documentation.
-Focus on: purpose, architecture, APIs, error handling, config, testing.
+The file '$($Gap.Target)' has NO documentation. Generate exactly $QuestionsPerGap questions that would produce a complete workflow doc following this standard:
+
+Required sections (use ## N. format): 1. Overview, 2. Trigger Points, 3. API Endpoints, 4. Request/Response Flow, 5. Sequence Diagram (MUST include mermaid), 6. Key Source Files, 7. Configuration Dependencies, 8. Telemetry & Logging, 9. How to Debug, 10. Error Scenarios.
+
+Generate questions that cover ALL required sections. Include at least one question about creating a mermaid sequence diagram.
 Output ONLY a JSON array of strings.
 "@
     }
@@ -649,7 +655,10 @@ Output ONLY a JSON array of strings.
         $missingSections = $Gap.MissingSections -join ", "
         $genPrompt = @"
 The doc '$($Gap.Target)' is INCOMPLETE, missing: $missingSections
-Generate exactly $QuestionsPerGap questions targeting those missing sections.
+
+These sections follow the standard: ## 1. Overview, ## 2. Trigger Points, ## 3. API Endpoints, ## 4. Request/Response Flow, ## 5. Sequence Diagram (with mermaid), ## 6. Key Source Files, ## 7. Configuration, ## 8. Telemetry, ## 9. How to Debug, ## 10. Error Scenarios.
+
+Generate exactly $QuestionsPerGap questions targeting those missing sections. If mermaid is missing, include a question about adding a sequence diagram.
 Output ONLY a JSON array of strings.
 "@
     }
