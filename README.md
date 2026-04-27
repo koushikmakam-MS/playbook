@@ -79,11 +79,15 @@ playbook/
 ├── shared/                     ← 🔧 Shared infrastructure
 │   ├── MonkeyCommon.psm1       ←   Core engine (retry, model, reporting, wizard, UI)
 │   ├── GitProviders.psm1       ←   Pluggable git (ADO, GitHub, GitLab, plain git)
-│   └── DocHealthScorer.psm1    ←   Before/after doc health scoring (0–110)
+│   ├── DocHealthScorer.psm1    ←   Before/after doc health scoring (0–110)
+│   └── CompletenessGate.psm1   ←   Contract-based completeness validation (DAG-like)
+│
+├── Run-Remediation.ps1         ← 🔧 Targeted remediation runner
 │
 └── prompts/                    ← 📝 AI prompts
     ├── playbook.txt            ←   75KB knowledge layer mega-prompt (7 phases)
-    └── curious-george-prompt.md←   3-pass autonomous auditor prompt
+    ├── curious-george-prompt.md←   3-pass autonomous auditor prompt
+    └── doc-standard.md         ←   Canonical workflow doc standard (10+1 sections)
 ```
 
 ---
@@ -437,6 +441,62 @@ Every question sent to Copilot includes a suffix that triggers **doc self-healin
 | Monkey success count | ≥ 1 | Block commit |
 | Answer rate | ≥ 50% | Block commit |
 | File changes | > 0 | Warning only |
+
+### Completeness Gate (DAG-like Guarantees)
+
+After monkeys run, a **contract-based completeness gate** validates every domain in your knowledge layer — providing the same fullness, completeness, and predictability guarantees as a DAG-based system, without the DAG complexity.
+
+**How it works:**
+
+1. **Parse manifest** — reads `Discovery_Manifest.md` to build typed contracts per domain
+2. **Validate filesystem** — checks each doc exists, has required sections (`## 1. Overview` through `## 10. Error Scenarios`), and includes a mermaid sequence diagram
+3. **Generate remediation queue** — items are typed: `CREATE_DOC`, `ADD_SECTION`, `ADD_MERMAID`
+4. **Bounded heal loop** — max 2 auto-fix passes with must-improve rule (stops if no progress)
+
+**Contract types:**
+
+| Doc Type | Required Sections | Mermaid? |
+|----------|:-:|:-:|
+| Primary workflow | 10 (§1–§10) | ✅ Required |
+| Reference doc | 1 (Overview) | Optional |
+| ADR | 3 (Context, Decision, Consequences) | Optional |
+
+**Standalone usage:**
+
+```powershell
+Import-Module ./shared/CompletenessGate.psm1
+Invoke-CompletenessGate -RepoPath "C:\your-repo"
+```
+
+### Doc Standard (Unified Across All Components)
+
+Every workflow doc follows the same **10+1 section standard**, enforced at every layer:
+
+```
+## Related Docs
+## 1. Overview
+## 2. Trigger Points          ← or "Key Components" for background workers
+## 3. API Endpoints            ← or "Key Workers" for background workers  
+## 4. Request/Response Flow
+## 5. Sequence Diagram         ← MUST contain ```mermaid sequenceDiagram
+## 6. Key Source Files
+## 7. Configuration Dependencies
+## 8. Telemetry & Logging
+## 9. How to Debug
+## 10. Error Scenarios
+```
+
+This standard is enforced in 6 places: `playbook.txt` (generation), `curious-george-prompt.md` (audit), `abu.ps1` (gap detection), `CompletenessGate.psm1` (validation), `copilot-instructions.md` (SKILL self-heal), and `doc-standard.md` (canonical reference).
+
+### Targeted Remediation
+
+`Run-Remediation.ps1` fixes specific gaps identified by the completeness gate without re-running the full monkey army:
+
+```powershell
+.\Run-Remediation.ps1 -RepoPath "C:\your-repo" -Model "claude-sonnet-4" -Commit
+```
+
+It batches section additions per file, adds mermaid diagrams following the Playbook standard (real method names, 4+ participants, alt/opt branching), and commits fixes atomically.
 
 ### Heal Mode
 
