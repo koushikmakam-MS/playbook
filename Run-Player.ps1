@@ -71,7 +71,7 @@ param(
     [switch]$ShowVerbose,
     [switch]$ForcePlaybook,      # Re-run playbook even if knowledge layer exists
     [string[]]$TargetAgents,     # AI agents to score for (copilot, cursor, claude, etc.)
-    [int]$BatchSize = 5,         # Questions per answer batch (default 5, 0 = single mode)
+    [int]$BatchSize = 10,        # Questions per answer batch (default 10, 0 = single mode)
     [int]$MaxQuestions = 500,     # Cap total questions per monkey (0 = no cap)
     [switch]$Incremental,        # Only process changed files
     [string]$Since,              # Git ref or date for incremental mode
@@ -936,6 +936,184 @@ $(if ($healedMonkeys.Count -gt 0) { "Healed: $($healedMonkeys -join ', ')" } els
 }
 
 # ══════════════════════════════════════════════════════════════════
+#  PHASE 9: CLEANUP — Dedup, template check, orphan removal, index rebuild
+# ══════════════════════════════════════════════════════════════════
+
+Write-Phase "CLEANUP" "Post-run doc cleanup and quality pass"
+
+# Take a pre-cleanup score to guard against regression
+$preCleanupScore = Get-DocHealthScore -RepoPath $workDir -IncludeBonus -TargetAgents $config['TargetAgents']
+Write-Step "Pre-cleanup score: $($preCleanupScore.TotalScore)/$($preCleanupScore.MaxScore) ($($preCleanupScore.Grade))" "INFO"
+
+$cleanupStats = @{ Deduped = 0; Orphaned = 0; IndexRebuilt = $false; Reverted = $false }
+
+# ── Step 1: Find duplicate docs (>70% content overlap) ──
+Write-Step "Step 1: Scanning for duplicate docs..." "INFO"
+$docDirs = @()
+if (Test-Path (Join-Path $workDir "docs")) { $docDirs += Get-ChildItem (Join-Path $workDir "docs") -Directory -Recurse | Where-Object { $_.Name -notmatch '^\.' } }
+if (Test-Path (Join-Path $workDir "copilot-docs")) { $docDirs += Get-ChildItem (Join-Path $workDir "copilot-docs") -Directory -Recurse | Where-Object { $_.Name -notmatch '^\.' } }
+
+$allDocs = @()
+foreach ($dir in $docDirs) {
+    $allDocs += Get-ChildItem $dir.FullName -Filter "*.md" -File -ErrorAction SilentlyContinue
+}
+# Also get docs in root doc folders
+foreach ($rootDocDir in @("docs", "copilot-docs")) {
+    $rootPath = Join-Path $workDir $rootDocDir
+    if (Test-Path $rootPath) {
+        $allDocs += Get-ChildItem $rootPath -Filter "*.md" -File -ErrorAction SilentlyContinue
+    }
+}
+$allDocs = @($allDocs | Sort-Object FullName -Unique)
+
+# Build word-bag fingerprints for each doc
+$docFingerprints = @{}
+foreach ($doc in $allDocs) {
+    try {
+        $content = Get-Content $doc.FullName -Raw -ErrorAction SilentlyContinue
+        if (-not $content -or $content.Length -lt 50) { continue }
+        # Normalize: lowercase, strip markdown syntax, extract words
+        $words = ($content.ToLower() -replace '[#*`\[\]()|\-_>]', ' ' -split '\s+' | Where-Object { $_.Length -gt 3 }) | Sort-Object -Unique
+        $docFingerprints[$doc.FullName] = @{ Words = $words; File = $doc; Size = $content.Length }
+    } catch { }
+}
+
+$duplicatePairs = @()
+$docPaths = @($docFingerprints.Keys)
+for ($i = 0; $i -lt $docPaths.Count; $i++) {
+    for ($j = $i + 1; $j -lt $docPaths.Count; $j++) {
+        $a = $docFingerprints[$docPaths[$i]]
+        $b = $docFingerprints[$docPaths[$j]]
+        if ($a.Words.Count -eq 0 -or $b.Words.Count -eq 0) { continue }
+
+        # Jaccard similarity on word sets
+        $intersection = @($a.Words | Where-Object { $b.Words -contains $_ }).Count
+        $union = @($a.Words + $b.Words | Sort-Object -Unique).Count
+        $similarity = if ($union -gt 0) { $intersection / $union } else { 0 }
+
+        if ($similarity -gt 0.70) {
+            $duplicatePairs += @{
+                FileA      = $docPaths[$i]
+                FileB      = $docPaths[$j]
+                Similarity = [Math]::Round($similarity * 100, 1)
+                SizeA      = $a.Size
+                SizeB      = $b.Size
+            }
+        }
+    }
+}
+
+if ($duplicatePairs.Count -gt 0) {
+    Write-Step "Found $($duplicatePairs.Count) duplicate doc pair(s) (>70% overlap)" "WARN"
+    foreach ($pair in $duplicatePairs) {
+        # Keep the larger file (more content), remove the smaller
+        $removeFile = if ($pair.SizeA -ge $pair.SizeB) { $pair.FileB } else { $pair.FileA }
+        $keepFile = if ($pair.SizeA -ge $pair.SizeB) { $pair.FileA } else { $pair.FileB }
+        $relRemove = $removeFile.Replace($workDir, "").TrimStart("\", "/")
+        $relKeep = $keepFile.Replace($workDir, "").TrimStart("\", "/")
+        Write-Step "  Removing '$relRemove' (dup of '$relKeep', $($pair.Similarity)% overlap)" "INFO"
+        Remove-Item $removeFile -Force -ErrorAction SilentlyContinue
+        $cleanupStats.Deduped++
+    }
+} else {
+    Write-Step "No duplicate docs found" "OK"
+}
+
+# ── Step 2: Remove orphan docs (all code refs dead) ──
+Write-Step "Step 2: Checking for orphan docs (all code refs dead)..." "INFO"
+$codeExtensions = @('cs', 'py', 'ts', 'js', 'java', 'go')
+$sourceFiles = @()
+foreach ($ext in $codeExtensions) {
+    $sourceFiles += Get-ChildItem $workDir -Filter "*.$ext" -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch '[\\/](bin|obj|node_modules|\.monkey-output)[\\/]' }
+}
+$sourceNames = @($sourceFiles | ForEach-Object { $_.BaseName.ToLower() }) | Sort-Object -Unique
+
+foreach ($doc in $allDocs) {
+    if (-not (Test-Path $doc.FullName)) { continue }  # may have been deduped
+    try {
+        $content = Get-Content $doc.FullName -Raw -ErrorAction SilentlyContinue
+        if (-not $content) { continue }
+        # Extract potential code references (PascalCase names that look like classes/methods)
+        $codeRefs = [regex]::Matches($content, '`([A-Z][a-zA-Z0-9]{3,})`') | ForEach-Object { $_.Groups[1].Value.ToLower() }
+        if ($codeRefs.Count -lt 3) { continue }  # skip docs with few code refs
+
+        $aliveRefs = @($codeRefs | Where-Object { $sourceNames -contains $_ }).Count
+        $deadPct = if ($codeRefs.Count -gt 0) { [Math]::Round((($codeRefs.Count - $aliveRefs) / $codeRefs.Count) * 100) } else { 0 }
+
+        if ($deadPct -ge 90 -and $codeRefs.Count -ge 5) {
+            $relPath = $doc.FullName.Replace($workDir, "").TrimStart("\", "/")
+            Write-Step "  Orphan: '$relPath' ($deadPct% dead refs, $($codeRefs.Count) total)" "WARN"
+            Remove-Item $doc.FullName -Force -ErrorAction SilentlyContinue
+            $cleanupStats.Orphaned++
+        }
+    } catch { }
+}
+Write-Step "Removed $($cleanupStats.Orphaned) orphan doc(s)" $(if ($cleanupStats.Orphaned -gt 0) { "WARN" } else { "OK" })
+
+# ── Step 3: Rebuild index files ──
+Write-Step "Step 3: Rebuilding index files..." "INFO"
+$docRootDirs = @()
+foreach ($rootDocDir in @("docs\knowledge\workflows", "docs\knowledge\adr", "copilot-docs\workflows", "copilot-docs\adr")) {
+    $dirPath = Join-Path $workDir $rootDocDir
+    if (Test-Path $dirPath) { $docRootDirs += $dirPath }
+}
+
+foreach ($indexDir in $docRootDirs) {
+    $readmePath = Join-Path $indexDir "README.md"
+    $mdFiles = @(Get-ChildItem $indexDir -Filter "*.md" -File | Where-Object { $_.Name -ne "README.md" } | Sort-Object Name)
+    if ($mdFiles.Count -eq 0) { continue }
+
+    $dirName = Split-Path $indexDir -Leaf
+    $indexLines = @("# $dirName Index", "", "| # | File | Title |", "|---|------|-------|")
+    $num = 0
+    foreach ($f in $mdFiles) {
+        $num++
+        $title = (Get-Content $f.FullName -TotalCount 5 | Where-Object { $_ -match '^#\s+' } | Select-Object -First 1) -replace '^#\s+', ''
+        if (-not $title) { $title = $f.BaseName }
+        $indexLines += "| $num | [$($f.Name)]($($f.Name)) | $title |"
+    }
+    $indexLines += "", "*Auto-generated by Monkey Army cleanup phase. $($mdFiles.Count) docs.*"
+    Set-Content $readmePath -Value ($indexLines -join "`n") -Encoding UTF8
+    Write-Step "  Rebuilt $dirName/README.md ($($mdFiles.Count) entries)" "OK"
+}
+$cleanupStats.IndexRebuilt = $true
+
+# ── Step 4: Score guard — ensure cleanup didn't reduce health score ──
+Write-Step "Step 4: Score guard check..." "INFO"
+$postCleanupScore = Get-DocHealthScore -RepoPath $workDir -IncludeBonus -TargetAgents $config['TargetAgents']
+$scoreDelta = $postCleanupScore.TotalScore - $preCleanupScore.TotalScore
+
+if ($scoreDelta -lt 0) {
+    Write-Step "⚠️ Score DROPPED by $([Math]::Abs($scoreDelta)) points ($($preCleanupScore.TotalScore) → $($postCleanupScore.TotalScore)) — reverting cleanup" "ERROR"
+    Push-Location $workDir
+    & git checkout -- . 2>&1 | Out-Null
+    Pop-Location
+    $cleanupStats.Reverted = $true
+    Write-Step "Cleanup reverted — no changes applied" "WARN"
+} else {
+    Write-Step "Score guard passed: $($preCleanupScore.TotalScore) → $($postCleanupScore.TotalScore) (delta: +$scoreDelta)" "OK"
+
+    # Commit cleanup changes
+    Push-Location $workDir
+    $cleanupChanges = @(& git --no-pager status --porcelain 2>&1 | Where-Object { $_ }).Count
+    if ($cleanupChanges -gt 0) {
+        & git add -A 2>&1 | Out-Null
+        $outputDirRel = ".monkey-output"
+        & git reset -- $outputDirRel 2>&1 | Out-Null
+        $stagedCount = @(& git --no-pager diff --cached --name-only 2>&1).Count
+        if ($stagedCount -gt 0) {
+            $cleanMsg = "docs: 🧹 post-run cleanup — $($cleanupStats.Deduped) deduped, $($cleanupStats.Orphaned) orphans removed, indexes rebuilt`n`nScore: $($preCleanupScore.TotalScore) → $($postCleanupScore.TotalScore) (delta: +$scoreDelta)`n`nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+            & git commit -m $cleanMsg 2>&1 | Out-Null
+            Write-Step "Committed cleanup: $stagedCount files changed" "OK"
+        }
+    }
+    Pop-Location
+}
+
+Write-Step "Cleanup complete: $($cleanupStats.Deduped) deduped, $($cleanupStats.Orphaned) orphans, indexes=$(if ($cleanupStats.IndexRebuilt) {'rebuilt'} else {'skipped'}), reverted=$($cleanupStats.Reverted)" "INFO"
+
+# ══════════════════════════════════════════════════════════════════
 #  PHASE 6: UNIFIED REPORT
 # ══════════════════════════════════════════════════════════════════
 
@@ -1012,6 +1190,7 @@ $unifiedReport = @{
     }
     HealedMonkeys = $healedMonkeys
     Summary       = $summaryStats
+    Cleanup       = $cleanupStats
     HealthScore   = @{
         Before = $beforeScore
         After  = $afterScore
