@@ -315,7 +315,9 @@ Or pick specific monkeys: `-Monkeys rafiki,mojo-jojo,marcel`
 | `-HealMode` | switch | — | Re-run failed monkeys with escalated model |
 | `-ForcePlaybook` | switch | — | Re-run Playbook even if knowledge layer exists |
 | `-ShowVerbose` | switch | — | Show detailed Copilot output |
-| `-TargetAgents` | string[] | `copilot` | AI agents to score for (`copilot`, `cursor`, `claude`, etc.) |
+| `-TargetAgents` | string[] | all | AI agents to score for (`copilot`, `cursor`, `claude`, etc.) — persisted in checkpoint |
+| `-GeorgeQuestionsPerDomain` | int | 50 | Questions per domain for Curious George |
+| `-AutoCleanup` | switch | — | Skip Phase 9 cleanup confirmation prompts |
 
 ---
 
@@ -348,8 +350,13 @@ Playbook automatically saves progress after each monkey completes. If a run is i
 |----------|----------|:-:|
 | Run progress (which monkeys completed) | `.monkey-output/run-checkpoint.json` | ✅ |
 | Generated questions per monkey | `.monkey-output/<monkey>/questions-checkpoint.json` | ✅ |
+| Batch answer progress | `.monkey-output/<monkey>/batch-checkpoint.json` | ✅ |
+| Marcel discovery results | `.monkey-output/marcel/discovery.json` | ✅ |
 | Working branch name | Embedded in checkpoint | ✅ |
 | Health baseline score | Embedded in checkpoint | ✅ |
+| Target AI agents | Embedded in checkpoint | ✅ |
+
+**Resume is fully non-interactive** — when `-Resume` detects a checkpoint, all interactive prompts (branch picker, pack selection, branch strategy) are automatically skipped. The run picks up exactly where it left off.
 
 When `-ParallelGen` is combined with `-Resume`, the gen phase is skipped entirely if question checkpoints exist — saving significant time on re-runs.
 
@@ -376,6 +383,42 @@ Only process files changed since a git ref or date — ideal for PR-scoped docum
 # Changes in last 10 commits
 .\Run-Player.ps1 -RepoPath "C:\myrepo" -Incremental -Since "HEAD~10" -Pack full
 ```
+
+### 🙈 Marcel Discovery Caching
+
+Marcel scans every doc file for code references and validates them against the codebase — an O(docs × refs) operation that can take hours on large repos. Discovery results are cached to `discovery.json` and reused on resume:
+
+| Scenario | What happens |
+|----------|-------------|
+| First run | Full discovery scan → saves `discovery.json` |
+| Resume + `discovery.json` exists | Loads cached results instantly (skips scan) |
+| Resume + `questions-checkpoint.json` exists | Skips discovery entirely (not needed) |
+| Cache corrupted | Falls back to full scan automatically |
+
+> On a 5,500-file repo with 468 docs, this saves **~2-3 hours** per resumed run.
+
+### ⚡ Circuit Breaker & Mid-Run Auto-Commit
+
+Batch execution includes a circuit breaker that protects against cascading failures:
+
+- After **5 consecutive failures**, the circuit breaker trips and auto-commits all work done so far
+- Prevents data loss from rate limits, network issues, or model timeouts
+- The run can be resumed with `-Resume` after the issue is resolved
+- Each batch also checks for file changes and commits them incrementally ("self-healing commits")
+
+### 🧹 Phase 9 — Post-Run Cleanup
+
+After all monkeys complete, Phase 9 automatically cleans up the generated documentation:
+
+| Step | What it does |
+|------|-------------|
+| **Smart Preflight** | Samples docs to decide which cleanup steps are needed |
+| **Dedup Detection** | LLM-powered similarity detection across monkey outputs |
+| **Orphan Removal** | Removes docs where ALL code references are dead |
+| **Index Rebuild** | Auto-generates README.md for each doc folder |
+| **Score Guard** | Reverts cleanup if health score drops more than 5 points |
+
+Phase 9 is automatic and only runs cleanup steps that the preflight determines are needed.
 
 ---
 
@@ -547,3 +590,23 @@ All monkeys are **language-agnostic** — entry point discovery uses pattern mat
 ## License
 
 MIT
+
+---
+
+## Real-World Results
+
+First production run against **Enterprise .NET Repository** (~5,500 files, ~3,000 source files):
+
+| Metric | Value |
+|--------|-------|
+| Questions generated | 2,091 |
+| Questions answered | 360 |
+| Docs produced | 494 files (~3.8 MB) |
+| Files self-healed | 19 |
+| Stale refs detected (Marcel) | 1,573 across 315 docs |
+| Session logs | 250 |
+| Total runtime | ~53 min (with resume, cached discovery) |
+| Crashes survived | 3 (VPN drop, timeout, rate limit) |
+| Human intervention | 0 after launch |
+
+**Doc Quality improved +4 points** from Marcel's stale reference fixes. Copilot-scoped AI Friendliness score: **21/25**.
