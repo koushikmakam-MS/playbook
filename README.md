@@ -655,7 +655,7 @@ MIT
 
 ## Real-World Results
 
-First production run against **Enterprise .NET Repository** (~5,500 files, ~3,000 source files):
+First production run against a large enterprise .NET repository (~5,500 files, ~3,000 source files):
 
 | Metric | Value |
 |--------|-------|

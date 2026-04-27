@@ -140,13 +140,13 @@ function Build-DomainContracts {
         # 6-column format has explicit Workflow Doc; 5-column derives from domain name
         $workflowDoc = if ($cells.Count -ge 6) { $cells[5].Trim() } else { "" }
 
-        # Extract relative path from backticks: `workflows/01_User_Auth.md`
+        # Extract relative path from backticks: `workflows/01_Domain_Name.md`
         $docRelPath = if ($workflowDoc -match '`([^`]+\.md)`') {
             $matches[1]
         } elseif ($workflowDoc -and $workflowDoc -match '\.md') {
             $workflowDoc
         } else {
-            # Derive from domain name: "User Auth" → "workflows/NN_User_Auth.md"
+            # Derive from domain name: "User Auth" → "workflows/User_Auth.md"
             $safeName = ($domainName -replace '[/\\:\s]+', '_' -replace '[^\w_]', '')
             "workflows/${safeName}.md"
         }
@@ -396,7 +396,7 @@ Create the workflow documentation file '$($result.DocRelativePath)' for the '$($
 The document MUST contain these required sections:
 $(($result | ForEach-Object { $_.MissingSections } | ForEach-Object { "- ## $($_.Number). $($_.Name)" }) -join "`n")
 
-Follow the same format as existing workflow docs in docs/knowledge/workflows/.
+Follow the same format as existing workflow docs in the workflows/ folder.
 Include: overview, entry points, request flow, sequence diagram, source files, config, telemetry, debugging, error scenarios.
 Base all content on actual source code analysis — do not fabricate.
 "@

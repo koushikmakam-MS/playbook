@@ -858,7 +858,7 @@ if ($completenessResult.GateResult.Results.Count -gt 0) {
 
             # Feed remediation prompts to Copilot
             foreach ($item in $remediationQueue) {
-                $targetDoc = Join-Path $workDir "docs\knowledge" $item.TargetFile
+                $targetDoc = Join-Path $docsRoot $item.TargetFile
                 Write-Step "  → [$($item.Type)] $($item.Domain): $($item.TargetFile)" "INFO"
 
                 try {

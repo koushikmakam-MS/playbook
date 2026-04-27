@@ -1,6 +1,6 @@
 # Workflow Documentation Standard
 
-Every workflow doc in `docs/knowledge/workflows/` MUST follow this structure.
+Every workflow doc in the `workflows/` folder MUST follow this structure.
 
 ## Required Sections (in order)
 

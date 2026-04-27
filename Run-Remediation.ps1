@@ -129,9 +129,9 @@ foreach ($group in $grouped) {
             $prompt = @"
 $($item.Prompt)
 
-IMPORTANT: Create the file at the exact path: docs/knowledge/$targetFile
+IMPORTANT: Create the file at the exact path relative to the docs root: $targetFile
 Analyze the actual source code in the repository to populate each section with accurate content.
-Follow the same format as docs/knowledge/workflows/01_User_Auth.md
+Follow the same format as existing workflow docs in the workflows/ folder.
 "@
             try {
                 $result = Invoke-CopilotWithRetry -Prompt $prompt `
@@ -156,7 +156,7 @@ Follow the same format as docs/knowledge/workflows/01_User_Auth.md
             Write-Step "  📝 ADD $($fileItems.Count) sections to: $targetFile" "INFO"
 
             $prompt = @"
-In the file 'docs/knowledge/$targetFile', add these missing sections:
+In the file '$targetFile', add these missing sections:
 
 $sectionList
 
