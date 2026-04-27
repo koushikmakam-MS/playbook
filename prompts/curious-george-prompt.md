@@ -123,9 +123,14 @@ Then RUN the autonomous loop — no more human interaction needed:
     | Controller | Source Path | Existing Doc? | Action |
     Actions: "Add to [existing doc]" or "Create new: [suggested name]"
 
-  STEP 4 — CREATE NEW DOCS (if auto-fix = yes):
-  - For each "Create new" action: create a workflow doc with these
-    REQUIRED sections in this exact order:
+  STEP 4 — CREATE OR UPDATE DOCS (if auto-fix = yes):
+  - PRIORITY: UPDATE existing docs over creating new ones.
+    Only create a new doc if NO existing doc covers this controller.
+  - For each "Add to" action (PREFERRED): read the controller, then
+    add the missing sections to the existing doc covering that
+    controller's APIs, flow, config, errors. Do NOT create a new file.
+  - For each "Create new" action (ONLY when no existing doc fits):
+    create a workflow doc with these REQUIRED sections in this exact order:
 
     ## Related Docs
     ## 1. Overview
@@ -251,10 +256,15 @@ THREE-PASS LOOP — DISCOVER, then BREADTH, then DEPTH:
 
     PHASE 4 — FIX (if ⚠️ or ❌ and auto-fix = yes):
       7. Trigger doc self-healing per copilot-instructions.md rules:
-         - Identify which doc should cover this (or create new one)
-         - Add the missing content with code references
+         - FIRST: check if an existing doc should cover this topic.
+           Search by controller name, domain, and related workflow docs.
+         - If existing doc found → UPDATE it (add missing section/content).
+           Do NOT create a new file.
+         - ONLY if no existing doc covers this topic → create a new doc
+           following the 10-section standard from copilot-instructions.md
          - Update indexes (README.md, SKILL.md) if new doc created
-         - Print: "📝 Fixed: added [what] to [which doc]"
+         - Print: "📝 Updated: added [what] to [which doc]"
+           or "📝 Created: [new doc] for [uncovered topic]"
       8. If auto-fix = dry-run, print: "🏷️ Would fix: [what] in [doc]"
 
     PHASE 5 — DOMAIN LOGIC:
