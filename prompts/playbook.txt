@@ -483,14 +483,19 @@ Prompt:
   |----------------|--------------------------|
   | «section name» | X/N |
 
-  The 14 standard sections are:
-    1. Overview  2. API Endpoints  3. Request/Response Flow
-    4. Key Source File References  5. User-Facing Models (DTOs)
-    6. Database Models  7. Configuration Dependencies
-    8. CAL Operations  9. External Service Interactions
-    10. Telemetry & Monitoring  11. Error Scenarios
-    12. FM Operation IDs  13. Kusto Debugging Queries
-    14. Related Documentation
+  The 10+1 standard sections are (every workflow doc MUST have these):
+    ## Related Docs
+    ## 1. Overview
+    ## 2. Trigger Points (or "Key Components" for background workers)
+    ## 3. API Endpoints (or "Key Workers" for background workers)
+    ## 4. Request/Response Flow
+    ## 5. Sequence Diagram — MUST contain a ```mermaid sequenceDiagram block
+    ## 6. Key Source Files
+    ## 7. Configuration Dependencies
+    ## 8. Telemetry & Logging
+    ## 9. How to Debug
+    ## 10. Error Scenarios
+    + Mermaid diagram (checked separately as §51)
 
   ---
 
