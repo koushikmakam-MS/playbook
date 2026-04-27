@@ -39,8 +39,8 @@ This domain handles user authentication workflows.
 - Scheduled jobs trigger token cleanup
 
 ## 3. API Endpoints
-- POST POST /api/auth/login
-- GET GET /api/auth/status/{id}
+- POST /api/auth/login
+- GET /api/auth/status/{id}
 
 ## 4. Request Flow
 Client calls controller, controller calls service, service persists.

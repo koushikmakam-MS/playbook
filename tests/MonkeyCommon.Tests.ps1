@@ -270,7 +270,7 @@ Describe "Get-DocDirectories" {
         $result | ForEach-Object { $_ | Should -Not -Match '\\' }
         # Should contain docs-related paths
         ($result -join "`n") | Should -Match 'docs'
-        ($result -join "`n") | Should -Match 'agentKT'
+        ($result -join "`n") | Should -Match 'knowledge'
     }
 
     It "Returns empty array when no doc directories exist" {
