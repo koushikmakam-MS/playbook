@@ -948,29 +948,18 @@ Write-Step "Preflight: sampling docs to decide what cleanup is needed..." "INFO"
 $preCleanupScore = Get-DocHealthScore -RepoPath $workDir -IncludeBonus -TargetAgents $config['TargetAgents']
 Write-Step "Pre-cleanup score: $($preCleanupScore.TotalScore)/$($preCleanupScore.MaxScore) ($($preCleanupScore.Grade))" "INFO"
 
-# Discover doc folders dynamically (same function monkeys use) and scope to diff from base
+# Discover doc folders dynamically (same function monkeys use)
 $agentDocPaths = Get-DocDirectories -RootDir $workDir
 Write-Step "Agent doc folders: $($agentDocPaths -join ', ')" "INFO"
 
-# Get top-level roots from discovered paths (e.g. 'docs', 'copilot-docs')
-$docRoots = @($agentDocPaths | ForEach-Object { ($_ -split '/')[0] } | Sort-Object -Unique)
-
-Push-Location $workDir
-$baseBranch = if ($config['BaseBranch']) { $config['BaseBranch'] } else { 'main' }
-$runMdFiles = @()
-foreach ($docRoot in $docRoots) {
-    # Committed .md files that differ from base
-    $diffOutput = @(& git --no-pager diff --name-only --diff-filter=AM "$baseBranch" -- "$docRoot/*.md" "$docRoot/**/*.md" 2>&1 | Where-Object { $_ -and $_ -notmatch '^fatal' })
-    # Uncommitted .md files in agent folders
-    $statusOutput = @(& git --no-pager status --porcelain -- "$docRoot" 2>&1 | Where-Object { $_ -match '\.md"?\s*$' } | ForEach-Object { ($_ -replace '^\s*\?\?\s*|^\s*[MADRCU]+\s*', '').Trim('"') })
-    foreach ($relPath in @($diffOutput + $statusOutput | Sort-Object -Unique | Where-Object { $_ })) {
-        $fullPath = Join-Path $workDir $relPath
-        if (Test-Path $fullPath) { $runMdFiles += Get-Item $fullPath }
+# Collect ALL .md files in agent doc folders (these are entirely playbook-created)
+$allDocs = @($agentDocPaths | ForEach-Object {
+    $dirPath = Join-Path $workDir $_
+    if (Test-Path $dirPath) {
+        Get-ChildItem $dirPath -Filter "*.md" -File -ErrorAction SilentlyContinue
     }
-}
-Pop-Location
-$allDocs = @($runMdFiles | Sort-Object FullName -Unique)
-Write-Step "Scoped to $($allDocs.Count) .md files in agent folders diffed from $baseBranch" "INFO"
+} | Sort-Object FullName -Unique)
+Write-Step "Scoped to $($allDocs.Count) .md files in agent doc folders" "INFO"
 
 # Signal 1: Duplication rate (sample 40 random docs, pairwise Jaccard)
 $dupRate = 0

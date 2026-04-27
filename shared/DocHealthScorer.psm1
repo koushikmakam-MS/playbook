@@ -595,8 +595,10 @@ function Show-ScoreDelta {
     )
 
     foreach ($cat in $catNames) {
-        $bScore = $Before.Categories[$cat.Key].Score
-        $aScore = $After.Categories[$cat.Key].Score
+        $bCat = if ($Before.Categories -is [hashtable]) { $Before.Categories[$cat.Key] } else { $Before.Categories.($cat.Key) }
+        $aCat = if ($After.Categories -is [hashtable]) { $After.Categories[$cat.Key] } else { $After.Categories.($cat.Key) }
+        $bScore = if ($bCat) { $bCat.Score } else { 0 }
+        $aScore = if ($aCat) { $aCat.Score } else { 0 }
         $delta  = $aScore - $bScore
         $dSign  = if ($delta -gt 0) { "+$delta" } elseif ($delta -eq 0) { " 0" } else { "$delta" }
         $dColor = if ($delta -gt 0) { 'Green' } elseif ($delta -eq 0) { 'DarkGray' } else { 'Red' }
