@@ -16,7 +16,6 @@ Every workflow doc in `docs/knowledge/workflows/` MUST follow this structure.
 ## 8. Telemetry & Logging
 ## 9. How to Debug
 ## 10. Error Scenarios
-## 11. Dependency DAG           ← MUST contain ```mermaid graph TD block
 ```
 
 ## Mermaid Diagram Rules
@@ -40,29 +39,10 @@ sequenceDiagram
 - Show decision points with `alt`/`opt` blocks
 - Include error paths as `alt` branches
 
-## Dependency DAG Rules
-
-Every workflow doc MUST include a dependency DAG in §11 using `graph TD`:
-
-```mermaid
-graph TD
-    A[Controller] --> B[Orchestrator / BL]
-    B --> C[Implementation / Adapter]
-    B --> D[Validator / Helper]
-    C --> E[External Client / SDK]
-    D --> F[Data Store / Cache]
-```
-
-- Extract from constructor injection, DI registrations, and `using` imports
-- Use REAL class names (e.g., `ProtectionPolicyController`, not `Controller`)
-- Show interface→implementation where relevant (e.g., `IFabricAdapter --> AzureFabricAdapter`)
-- Include external dependencies (ARM, Storage, KeyVault, queues)
-- Minimum 4 nodes for any non-trivial domain
-
 ## Section Numbering
 
 - Use `## N.` format (e.g., `## 1. Overview`, not `## Overview`)
-- §1-§10 + mermaid sequence diagram + §11 dependency DAG are the minimum
+- Additional sections (§11+) are encouraged but §1-§10 + mermaid are the minimum
 
 ## Content Rules
 

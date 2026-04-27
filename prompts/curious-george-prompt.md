@@ -146,16 +146,10 @@ Then RUN the autonomous loop — no more human interaction needed:
     ## 8. Telemetry & Logging
     ## 9. How to Debug
     ## 10. Error Scenarios
-    ## 11. Dependency DAG
-       ← MUST include a ```mermaid graph TD block here.
-       Rules: use REAL class names from constructor injection/DI,
-       show interface→implementation, include external dependencies,
-       minimum 4 nodes for non-trivial domains.
 
     Read the controller source AND its BL layer (follow the call
     chain 2+ levels deep). Fill in REAL data — no placeholders.
-    Every doc MUST have at least one mermaid sequence diagram
-    and one mermaid dependency DAG.
+    Every doc MUST have at least one mermaid sequence diagram.
   - For each "Add to" action: read the controller, then add a new
     section to the existing doc covering that controller's APIs,
     flow, config, errors.
@@ -267,7 +261,7 @@ THREE-PASS LOOP — DISCOVER, then BREADTH, then DEPTH:
          - If existing doc found → UPDATE it (add missing section/content).
            Do NOT create a new file.
          - ONLY if no existing doc covers this topic → create a new doc
-           following the 11-section standard from copilot-instructions.md
+           following the 10-section standard from copilot-instructions.md
          - Update indexes (README.md, SKILL.md) if new doc created
          - Print: "📝 Updated: added [what] to [which doc]"
            or "📝 Created: [new doc] for [uncovered topic]"

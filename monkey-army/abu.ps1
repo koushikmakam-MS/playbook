@@ -161,8 +161,6 @@ $script:EXPECTED_SECTIONS = @(
     @{ Name = "8. Telemetry & Logging";       Patterns = @('##\s*8\.\s*Telemetry', 'telemetry', 'logging', 'tracing') }
     @{ Name = "9. How to Debug";              Patterns = @('##\s*9\.\s*(How\s*to\s*Debug|Debug)', 'debug', 'troubleshoot') }
     @{ Name = "10. Error Scenarios";          Patterns = @('##\s*10\.\s*Error', 'error.*scenario', 'error.*handling') }
-    @{ Name = "11. Dependency DAG";            Patterns = @('##\s*11\.\s*Dependency\s*DAG', 'dependency.*dag', 'dependency.*graph') }
-    @{ Name = "Mermaid DAG";                   Patterns = @('```mermaid\s*\n\s*graph\s') }
 )
 
 # Code file patterns (entry points to cross-reference against docs)
@@ -647,7 +645,7 @@ function New-SingleGapQuestions {
         $genPrompt = @"
 The file '$($Gap.Target)' has NO documentation. Generate exactly $QuestionsPerGap questions that would produce a complete workflow doc following this standard:
 
-Required sections (use ## N. format): 1. Overview, 2. Trigger Points, 3. API Endpoints, 4. Request/Response Flow, 5. Sequence Diagram (MUST include mermaid), 6. Key Source Files, 7. Configuration Dependencies, 8. Telemetry & Logging, 9. How to Debug, 10. Error Scenarios, 11. Dependency DAG (MUST include mermaid graph TD with real class names from constructor injection/DI).
+Required sections (use ## N. format): 1. Overview, 2. Trigger Points, 3. API Endpoints, 4. Request/Response Flow, 5. Sequence Diagram (MUST include mermaid), 6. Key Source Files, 7. Configuration Dependencies, 8. Telemetry & Logging, 9. How to Debug, 10. Error Scenarios.
 
 Generate questions that cover ALL required sections. Include at least one question about creating a mermaid sequence diagram.
 Output ONLY a JSON array of strings.
@@ -658,7 +656,7 @@ Output ONLY a JSON array of strings.
         $genPrompt = @"
 The doc '$($Gap.Target)' is INCOMPLETE, missing: $missingSections
 
-These sections follow the standard: ## 1. Overview, ## 2. Trigger Points, ## 3. API Endpoints, ## 4. Request/Response Flow, ## 5. Sequence Diagram (with mermaid), ## 6. Key Source Files, ## 7. Configuration, ## 8. Telemetry, ## 9. How to Debug, ## 10. Error Scenarios, ## 11. Dependency DAG (with mermaid graph TD showing real class dependency chain from constructor injection).
+These sections follow the standard: ## 1. Overview, ## 2. Trigger Points, ## 3. API Endpoints, ## 4. Request/Response Flow, ## 5. Sequence Diagram (with mermaid), ## 6. Key Source Files, ## 7. Configuration, ## 8. Telemetry, ## 9. How to Debug, ## 10. Error Scenarios.
 
 Generate exactly $QuestionsPerGap questions targeting those missing sections. If mermaid is missing, include a question about adding a sequence diagram.
 Output ONLY a JSON array of strings.

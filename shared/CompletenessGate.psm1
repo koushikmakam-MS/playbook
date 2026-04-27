@@ -31,8 +31,6 @@ $script:PrimaryWorkflowSections = @(
     @{ Number = 8;  Pattern = '##\s*8\.\s*Telemetry';                  Name = 'Telemetry & Logging' }
     @{ Number = 9;  Pattern = '##\s*9\.\s*(How\s*to\s*Debug|Debug)';   Name = 'How to Debug' }
     @{ Number = 10; Pattern = '##\s*10\.\s*Error\s*Scenarios';         Name = 'Error Scenarios' }
-    @{ Number = 11; Pattern = '##\s*11\.\s*Dependency\s*DAG';          Name = 'Dependency DAG' }
-    @{ Number = 52; Pattern = '```mermaid\s*\n\s*graph\s';             Name = 'Mermaid DAG (graph TD in any section)'; Optional = $false }
 )
 
 # Reference docs: lighter requirements

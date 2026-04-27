@@ -324,14 +324,13 @@ Prompt:
           using the Workflow Doc Template below
         - After fixing → update doc_registry.md
 
-     B. **Workflow Doc Template** — embed the EXACT 11+1 section standard:
+     B. **Workflow Doc Template** — embed the EXACT 10+1 section standard:
         ## Related Docs, ## 1. Overview, ## 2. Trigger Points,
         ## 3. API Endpoints, ## 4. Request/Response Flow,
-        ## 5. Sequence Diagram (MUST contain mermaid sequenceDiagram),
+        ## 5. Sequence Diagram (MUST contain mermaid),
         ## 6. Key Source Files, ## 7. Configuration Dependencies,
         ## 8. Telemetry & Logging, ## 9. How to Debug,
-        ## 10. Error Scenarios,
-        ## 11. Dependency DAG (MUST contain mermaid graph TD with real class names)
+        ## 10. Error Scenarios
         Include non-negotiable rules: ## N. numbering, mermaid required,
         real source code references only.
 
@@ -428,17 +427,13 @@ Prompt:
 
   ## 10. Error Scenarios
   <!-- Table: Error | Cause | Recovery | Code Reference -->
-
-  ## 11. Dependency DAG
-  <!-- Mermaid graph TD showing class dependency chain from constructor injection/DI -->
   ```
 
   NON-NEGOTIABLE RULES:
   - Section numbering MUST use `## N.` format (e.g., `## 1. Overview`)
   - For background workers: use "Key Components" for §2, "Key Workers" for §3
-  - Extra sections (§12+) are encouraged but §1-§11 are required
-  - Every workflow doc MUST include at least one mermaid sequence diagram in §5
-  - Every workflow doc MUST include a mermaid graph TD dependency DAG in §11
+  - Extra sections (§11+) are encouraged but §1-§10 are required
+  - Every workflow doc MUST include at least one mermaid sequence diagram
 
   **Mermaid sequence diagram** — every §5 MUST include a ```mermaid block:
     ```mermaid
@@ -553,9 +548,7 @@ Prompt:
     ## 8. Telemetry & Logging
     ## 9. How to Debug
     ## 10. Error Scenarios
-    + Mermaid sequence diagram (checked separately as §51)
-    ## 11. Dependency DAG — MUST contain a ```mermaid graph TD block
-    + Mermaid DAG diagram (checked separately as §52)
+    + Mermaid diagram (checked separately as §51)
 
   ---
 
