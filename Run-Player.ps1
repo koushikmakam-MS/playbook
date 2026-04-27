@@ -88,6 +88,7 @@ $ErrorActionPreference = "Stop"
 Import-Module (Join-Path $PSScriptRoot "shared\MonkeyCommon.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "shared\GitProviders.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "shared\DocHealthScorer.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot "shared\CompletenessGate.psm1") -Force
 
 # ── Playbook skip detection ────────────────────────────────────────
 
@@ -793,7 +794,7 @@ foreach ($monkey in $config.OrderedMonkeys) {
 }
 
 # ══════════════════════════════════════════════════════════════════
-#  PHASE 3: QUALITY GATE
+#  PHASE 3: QUALITY GATE (Behavioral + Completeness Contract)
 # ══════════════════════════════════════════════════════════════════
 
 Write-Phase "QUALITY GATE" "Evaluating results"
@@ -815,6 +816,8 @@ Pop-Location
 $gatePass = $true
 $gateReasons = @()
 
+# ── Behavioral gates (original) ──────────────────────────────────
+
 # Gate 1: At least one monkey succeeded
 if ($successCount -eq 0 -and $partialCount -eq 0) {
     $gatePass = $false
@@ -831,6 +834,82 @@ if ($totalAsked -gt 0 -and $answerRate -lt 50) {
 # Gate 3: Some doc changes happened
 if ($changedFiles -eq 0) {
     $gateReasons += "No file changes detected (docs may already be complete)"
+}
+
+# ── Completeness contract gate (DAG-like guarantees) ─────────────
+
+Write-Step "Running completeness contract validation..." "INFO"
+$completenessResult = Invoke-CompletenessGate -RepoPath $workDir
+
+if ($completenessResult.GateResult.Results.Count -gt 0) {
+    $cgr = $completenessResult.GateResult
+    if (-not $cgr.Pass) {
+        $gateReasons += "Completeness: $($cgr.Satisfied)/$($cgr.TotalContracts) contracts satisfied ($($cgr.Partial) partial, $($cgr.Missing) missing)"
+
+        # ── Bounded remediation loop (max 2 passes) ──────────────
+        $maxHealPasses = 2
+        $healPass = 0
+        $remediationQueue = $completenessResult.RemediationQueue
+
+        while ($remediationQueue.Count -gt 0 -and $healPass -lt $maxHealPasses) {
+            $healPass++
+            $prevGaps = $remediationQueue.Count
+            Write-Step "Completeness heal pass $healPass/$maxHealPasses ($($remediationQueue.Count) gaps)..." "INFO"
+
+            # Feed remediation prompts to Copilot
+            foreach ($item in $remediationQueue) {
+                $targetDoc = Join-Path $workDir "docs\knowledge" $item.TargetFile
+                Write-Step "  → [$($item.Type)] $($item.Domain): $($item.TargetFile)" "INFO"
+
+                try {
+                    $healPrompt = "$($item.Prompt)`n`nRepository path: $workDir"
+                    $healOutput = Invoke-CopilotWithRetry -Prompt $healPrompt `
+                        -Model $(if ($selectedModel) { $selectedModel } else { 'claude-sonnet-4' }) `
+                        -WorkingDirectory $workDir `
+                        -MaxRetries 2 -BaseDelay 15 -Timeout 180
+
+                    if ($healOutput -and $healOutput.ExitCode -eq 0) {
+                        Write-Step "    ✅ Remediated" "OK"
+                    }
+                } catch {
+                    Write-Step "    ⚠️ Heal failed: $($_.Exception.Message)" "WARN"
+                }
+            }
+
+            # Re-validate after heal pass
+            $recheck = Invoke-CompletenessGate -RepoPath $workDir -Quiet
+            $cgr = $recheck.GateResult
+            $remediationQueue = $recheck.RemediationQueue
+
+            # Must-improve rule: stop if no progress
+            if ($remediationQueue.Count -ge $prevGaps) {
+                Write-Step "Heal pass $healPass made no progress — stopping remediation" "WARN"
+                break
+            }
+
+            Write-Step "After heal pass $healPass: $($cgr.Satisfied)/$($cgr.TotalContracts) satisfied" "INFO"
+        }
+
+        # Final completeness verdict after heal attempts
+        if ($cgr.Pass) {
+            Write-Step "Completeness gate: PASS after $healPass heal pass(es) ✅" "OK"
+            $gateReasons = @($gateReasons | Where-Object { $_ -notmatch '^Completeness:' })
+        } else {
+            # Structural failures block commit; report remaining gaps
+            $structuralFailure = ($cgr.Missing -gt 0)
+            if ($structuralFailure) {
+                $gatePass = $false
+                $gateReasons += "Completeness BLOCKED: $($cgr.Missing) domain(s) have no doc file"
+            } else {
+                # Partial docs (missing sections) — warn but don't block
+                $gateReasons += "Completeness WARNING: $($cgr.Partial) doc(s) missing sections (non-blocking)"
+            }
+        }
+    } else {
+        Write-Step "Completeness gate: $($cgr.Verdict)" "OK"
+    }
+} else {
+    Write-Step "Completeness gate: SKIP (no manifest found)" "SKIP"
 }
 
 $gateVerdict = if ($gatePass) { "PASS ✅" } else { "FAIL ❌" }
