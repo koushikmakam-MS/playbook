@@ -1345,6 +1345,7 @@ $summaryStats = @{
     "Total Retries"     = $totalRetries
     "Files Changed"     = $totalFiles
     "Quality Gate"      = $gateVerdict
+    "Gen Phase"         = if ($parallelGenResults.Count -gt 0 -and $genElapsed) { "$genElapsed ($($parallelGenResults.Count) monkeys, $totalQs questions)" } else { "N/A (sequential)" }
     "Duration"          = $armyElapsed.ToString('hh\:mm\:ss')
     "Model"             = if ($selectedModel) { $selectedModel } else { "(default)" }
     "Branch"            = $branchName
@@ -1386,6 +1387,9 @@ $unifiedReport = @{
         GradeChange = "$($beforeScore.Grade) → $($afterScore.Grade)"
     }
     Duration      = $armyElapsed.ToString('hh\:mm\:ss')
+    GenPhase      = if ($parallelGenResults.Count -gt 0 -and $genElapsed) {
+        @{ Elapsed = $genElapsed; Monkeys = $parallelGenResults.Count; TotalQuestions = $totalQs }
+    } else { $null }
 }
 $unifiedReport | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $outputRoot "army-report.json") -Encoding UTF8
 
