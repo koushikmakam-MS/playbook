@@ -178,6 +178,8 @@ $configParams = @{}
 foreach ($key in $PSBoundParameters.Keys) {
     $configParams[$key] = $PSBoundParameters[$key]
 }
+# When resuming, suppress interactive prompts — checkpoint will override defaults
+if ($Resume) { $configParams['NonInteractive'] = [switch]::new($true) }
 $config = Get-ArmyConfig @configParams
 
 # ══════════════════════════════════════════════════════════════════
@@ -243,9 +245,10 @@ if ($earlyRepoPath -and -not $CleanStart) {
             }
 
             if ($useCheckpoint) {
-                # Override branch to match checkpoint
+                # Override branch to match checkpoint — force non-interactive to skip all prompts
                 $config['BranchName'] = $cpBranch
                 if (-not $Resume) { $Resume = $true }
+                $NonInteractive = $true
                 Write-Step "Branch (checkpoint): $cpBranch" "OK"
             }
         }
