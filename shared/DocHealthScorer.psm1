@@ -144,7 +144,7 @@ function Measure-DocQuality {
     $score = 20  # Start at max, deduct for issues
     $details = @{}
 
-    # Dead references — check file paths in docs (deduct up to 8pts)
+    # Dead references — check file paths in docs (deduct up to 8pts, ratio-based)
     $cachedFiles = @{}; foreach ($f in $AllFiles) { $cachedFiles[$f] = $true }
     $deadRefs = 0; $checkedRefs = 0
     $sampledDocs = @($DocFiles | Sort-Object | Select-Object -First ([Math]::Min(30, $DocFiles.Count)))
@@ -161,13 +161,16 @@ function Measure-DocQuality {
             if (-not $cachedFiles.ContainsKey($resolved) -and -not $cachedFiles.ContainsKey($refPath)) {
                 $deadRefs++
             }
-            if ($checkedRefs -ge 200) { break }  # Cap for performance
+            if ($checkedRefs -ge 200) { break }
         }
         if ($checkedRefs -ge 200) { break }
     }
-    $deadDeduct = [Math]::Min(8, [Math]::Round($deadRefs * 2))
+    # Proportional: deduct based on dead/total ratio (not absolute count)
+    $deadRatio = if ($checkedRefs -gt 0) { $deadRefs / $checkedRefs } else { 0 }
+    $deadDeduct = [Math]::Min(8, [Math]::Round($deadRatio * 16))  # 50% dead = -8pts
     $score -= $deadDeduct
-    $details['DeadRefs'] = "$deadRefs dead references found in $checkedRefs checked (-$deadDeduct pts)"
+    $pctDead = [Math]::Round($deadRatio * 100)
+    $details['DeadRefs'] = "$deadRefs/$checkedRefs refs dead ($pctDead%) (-$deadDeduct pts)"
 
     # Doc freshness vs code — compare timestamps (deduct up to 7pts)
     $staleCount = 0
@@ -363,12 +366,16 @@ function Measure-RiskSignals {
     $secretCount = 0; $emptyCatchCount = 0; $todoCount = 0
 
     foreach ($f in $sampled) {
+        # Skip doc/config files for secret detection (high false-positive rate)
+        $isDocFile = $f -match '\.(md|rst|txt|adoc|xml|json|yaml|yml)$'
         $content = Get-FileContent -RepoPath $RepoPath -RelPath $f -MaxBytes 30000
         if (-not $content) { continue }
 
-        # Hardcoded secrets
-        if ($content -match '(?i)(password|secret|apikey|api_key|connectionstring|private_key|access_key)\s*[=:]\s*["''][^\s"'']{8,}["'']') {
-            $secretCount++
+        # Hardcoded secrets — only in source code, skip test files and doc examples
+        if (-not $isDocFile -and $f -notmatch '(test|spec|mock|fake|sample|example)') {
+            if ($content -match '(?i)(password|secret|apikey|api_key|connectionstring|private_key|access_key)\s*[=:]\s*["''][^\s"'']{8,}["'']') {
+                $secretCount++
+            }
         }
         # Empty catch blocks
         $emptyCatches = [regex]::Matches($content, 'catch\s*(\([^)]*\))?\s*\{\s*\}')
@@ -393,6 +400,61 @@ function Measure-RiskSignals {
 
     $score = [Math]::Max(0, $score)
     return @{ Score = $score; Max = 20; Details = $details }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# CATEGORY 6: KNOWLEDGE LAYER COMPLETENESS (15 pts)
+# ═══════════════════════════════════════════════════════════════
+
+function Measure-KnowledgeLayer {
+    <#
+    .SYNOPSIS
+        Measures the completeness of the repo's knowledge layer — instructions, skills, workflow docs, doc coverage.
+    #>
+    param([string]$RepoPath, [string[]]$AllFiles, [string[]]$SourceFiles, [string[]]$DocFiles)
+
+    $score = 0
+    $details = @{}
+
+    # copilot-instructions.md exists & substantial (3pts)
+    $ci = $AllFiles | Where-Object { $_ -match 'copilot-instructions\.(md|yaml)$' } | Select-Object -First 1
+    if ($ci) {
+        $content = Get-FileContent -RepoPath $RepoPath -RelPath $ci
+        if ($content -and $content.Length -gt 500) { $score += 3; $details['CopilotInstructions'] = "✅ $([Math]::Round($content.Length/1KB,1))KB" }
+        else { $score += 1; $details['CopilotInstructions'] = "⚠️ Exists but thin" }
+    } else { $details['CopilotInstructions'] = "❌ Not found" }
+
+    # Skills directory (2pts)
+    $skills = @($AllFiles | Where-Object { $_ -match '\.github/skills/.*\.md$' })
+    if ($skills.Count -ge 2) { $score += 2; $details['Skills'] = "✅ $($skills.Count) skill files" }
+    elseif ($skills.Count -gt 0) { $score += 1; $details['Skills'] = "⚠️ $($skills.Count) skill file" }
+    else { $details['Skills'] = "❌ None" }
+
+    # Workflow / knowledge docs — scaled by repo size (5pts)
+    $workflows = @($AllFiles | Where-Object { $_ -match '(workflows?|knowledge|copilot-docs|agent-docs|kb|agentKT)/.*\.md$' })
+    $wfCount = $workflows.Count
+    # Scale expectation: ~1 doc per 20 source files is excellent
+    $expectedDocs = [Math]::Max(5, [Math]::Round($SourceFiles.Count / 20))
+    $wfRatio = if ($expectedDocs -gt 0) { [Math]::Min(1.0, $wfCount / $expectedDocs) } else { 0 }
+    $wfScore = [Math]::Min(5, [Math]::Round($wfRatio * 5))
+    $score += $wfScore
+    $details['WorkflowDocs'] = "$wfCount docs (expected ~$expectedDocs for repo size) ($wfScore/5 pts)"
+
+    # Doc coverage ratio — docs per source file (5pts)
+    # Measures how well-documented the codebase is overall
+    $docRatio = if ($SourceFiles.Count -gt 0) { $DocFiles.Count / $SourceFiles.Count } else { 0 }
+    # Thresholds: 0.05 (1 doc per 20 src) = 1pt, 0.10 = 3pts, 0.15+ = 5pts
+    $covScore = if ($docRatio -ge 0.15) { 5 }
+                elseif ($docRatio -ge 0.10) { 4 }
+                elseif ($docRatio -ge 0.07) { 3 }
+                elseif ($docRatio -ge 0.05) { 2 }
+                elseif ($docRatio -ge 0.02) { 1 }
+                else { 0 }
+    $score += $covScore
+    $pctCov = [Math]::Round($docRatio * 100, 1)
+    $details['DocCoverage'] = "$($DocFiles.Count) docs / $($SourceFiles.Count) source ($pctCov%) ($covScore/5 pts)"
+
+    return @{ Score = [Math]::Min(15, $score); Max = 15; Details = $details }
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -486,9 +548,10 @@ function Get-DocHealthScore {
     $aiFriendly = Measure-AIFriendliness -RepoPath $RepoPath -AllFiles $allFiles -SourceFiles $sourceFiles -TargetAgents $TargetAgents
     $testCov    = Measure-TestCoverage -RepoPath $RepoPath -AllFiles $allFiles -SourceFiles $sourceFiles -TestFiles $testFiles
     $risk       = Measure-RiskSignals -RepoPath $RepoPath -AllFiles $allFiles -SourceFiles $sourceFiles
+    $knowledge  = Measure-KnowledgeLayer -RepoPath $RepoPath -AllFiles $allFiles -SourceFiles $sourceFiles -DocFiles $docFiles
 
-    $totalScore = $codeDocs.Score + $docQuality.Score + $aiFriendly.Score + $testCov.Score + $risk.Score
-    $totalMax   = 100
+    $totalScore = $codeDocs.Score + $docQuality.Score + $aiFriendly.Score + $testCov.Score + $risk.Score + $knowledge.Score
+    $totalMax   = 115
 
     $bonus = $null
     if ($IncludeBonus) {
@@ -511,6 +574,7 @@ function Get-DocHealthScore {
             AIFriendliness    = $aiFriendly
             TestCoverage      = $testCov
             RiskSignals       = $risk
+            KnowledgeLayer    = $knowledge
         }
         Bonus          = $bonus
         FileStats      = @{
@@ -534,6 +598,7 @@ function Get-DocHealthScore {
             @{ Name = '🤖 AI Friendliness';     S = $aiFriendly }
             @{ Name = '🧪 Test Coverage';        S = $testCov }
             @{ Name = '⚠️  Risk Signals';        S = $risk }
+            @{ Name = '📚 Knowledge Layer';      S = $knowledge }
         )
         foreach ($cat in $categories) {
             $pct = [Math]::Round(($cat.S.Score / $cat.S.Max) * 100)
@@ -592,6 +657,7 @@ function Show-ScoreDelta {
         @{ Key = 'AIFriendliness';    Label = '🤖 AI Friendliness' }
         @{ Key = 'TestCoverage';      Label = '🧪 Test Coverage' }
         @{ Key = 'RiskSignals';       Label = '⚠️  Risk Signals' }
+        @{ Key = 'KnowledgeLayer';    Label = '📚 Knowledge Layer' }
     )
 
     foreach ($cat in $catNames) {
