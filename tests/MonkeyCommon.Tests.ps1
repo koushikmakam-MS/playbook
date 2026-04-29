@@ -492,3 +492,206 @@ Describe "UI Helpers — No-Crash Tests" {
         { Write-MonkeySummary -Stats $stats -Emoji "🐵" } | Should -Not -Throw
     }
 }
+
+# ─────────────────────────────────────────────
+# Region: Significance Detection & Doc-Impact Scoring Tests
+# ─────────────────────────────────────────────
+
+Describe "Get-FileChangeSignificance" {
+    # Private function — test via InModuleScope
+    It "Classifies .csproj change as TRIVIAL" {
+        InModuleScope MonkeyCommon {
+            $result = Get-FileChangeSignificance -FilePath "src/MyProject.csproj"
+            $result.Classification | Should -Be 'TRIVIAL'
+        }
+    }
+
+    It "Classifies .editorconfig as TRIVIAL" {
+        InModuleScope MonkeyCommon {
+            $result = Get-FileChangeSignificance -FilePath ".editorconfig"
+            $result.Classification | Should -Be 'TRIVIAL'
+        }
+    }
+
+    It "Classifies new controller as SIGNIFICANT" {
+        InModuleScope MonkeyCommon {
+            $result = Get-FileChangeSignificance -FilePath "src/Controllers/UserController.cs"
+            $result.Classification | Should -Be 'SIGNIFICANT'
+        }
+    }
+
+    It "Classifies config change as SIGNIFICANT" {
+        InModuleScope MonkeyCommon {
+            $result = Get-FileChangeSignificance -FilePath "config/appsettings.json"
+            $result.Classification | Should -Be 'SIGNIFICANT'
+        }
+    }
+
+    It "Classifies comment-only diff as TRIVIAL" {
+        InModuleScope MonkeyCommon {
+            $diff = @"
+--- a/src/Service.cs
++++ b/src/Service.cs
+-// old comment
++// new comment
++// another comment line
+"@
+            $result = Get-FileChangeSignificance -FilePath "src/Service.cs" -DiffContent $diff
+            $result.Classification | Should -Be 'TRIVIAL'
+        }
+    }
+
+    It "Defaults to SIGNIFICANT for unknown file" {
+        InModuleScope MonkeyCommon {
+            $result = Get-FileChangeSignificance -FilePath "random.xyz"
+            $result.Classification | Should -Be 'SIGNIFICANT'
+        }
+    }
+
+    It "Classifies .gitignore as TRIVIAL" {
+        InModuleScope MonkeyCommon {
+            $result = Get-FileChangeSignificance -FilePath ".gitignore"
+            $result.Classification | Should -Be 'TRIVIAL'
+        }
+    }
+
+    It "Classifies dependency manifest as SIGNIFICANT" {
+        InModuleScope MonkeyCommon {
+            $result = Get-FileChangeSignificance -FilePath "package.json"
+            $result.Classification | Should -Be 'SIGNIFICANT'
+        }
+    }
+
+    It "Classifies whitespace-only diff as TRIVIAL" {
+        InModuleScope MonkeyCommon {
+            $diff = @"
+--- a/src/Foo.cs
++++ b/src/Foo.cs
+-
++
+"@
+            $result = Get-FileChangeSignificance -FilePath "src/Foo.cs" -DiffContent $diff
+            $result.Classification | Should -Be 'TRIVIAL'
+        }
+    }
+
+    It "Classifies error-handling addition as SIGNIFICANT" {
+        InModuleScope MonkeyCommon {
+            $diff = @"
+--- a/src/Svc.cs
++++ b/src/Svc.cs
++    catch (Exception ex)
++    {
++        throw new AppException(ex);
++    }
+"@
+            $result = Get-FileChangeSignificance -FilePath "src/Svc.cs" -DiffContent $diff
+            $result.Classification | Should -Be 'SIGNIFICANT'
+        }
+    }
+
+    It "Returns a Reason string" {
+        InModuleScope MonkeyCommon {
+            $result = Get-FileChangeSignificance -FilePath "src/Foo.sln"
+            $result.Reason | Should -Not -BeNullOrEmpty
+        }
+    }
+}
+
+Describe "Get-DocImpactScore" {
+    BeforeEach {
+        $script:testRoot = Join-Path $TestDrive "impact-$(Get-Random)"
+        New-Item -ItemType Directory $script:testRoot -Force | Out-Null
+
+        # Create a realistic docs structure
+        $docsRoot   = Join-Path $script:testRoot "docs"
+        $wfDir      = Join-Path $docsRoot "workflows"
+        $srcDir     = Join-Path $script:testRoot "src" "Controllers"
+        New-Item -ItemType Directory $wfDir  -Force | Out-Null
+        New-Item -ItemType Directory $srcDir -Force | Out-Null
+
+        # Workflow docs
+        "Auth workflow doc" | Set-Content (Join-Path $wfDir "01_Auth.md")
+        "Payments workflow doc" | Set-Content (Join-Path $wfDir "02_Payments.md")
+
+        # Source files
+        "public class AuthController {}" | Set-Content (Join-Path $srcDir "AuthController.cs")
+        "public class PaymentController {}" | Set-Content (Join-Path $srcDir "PaymentController.cs")
+
+        # Discovery Manifest
+        $manifest = @"
+# Discovery Manifest
+
+## Identified Domains
+
+| # | Domain Name | Entry Points | Shared Impl | Doc Type | Workflow Doc |
+|---|-------------|--------------|-------------|----------|--------------|
+| 1 | Auth | AuthController.cs, LoginHandler.cs | AuthService.cs | workflow | 01_Auth.md |
+| 2 | Payments | PaymentController.cs | PaymentService.cs | workflow | 02_Payments.md |
+"@
+        $script:manifestPath = Join-Path $script:testRoot "Discovery_Manifest.md"
+        $manifest | Set-Content $script:manifestPath
+        $script:docsRoot = $docsRoot
+    }
+
+    It "Scores 0 for unrelated file change" {
+        $result = Get-DocImpactScore -ChangedFiles @("README.md") `
+            -ManifestPath $script:manifestPath -DocsRoot $script:docsRoot
+
+        $result.TotalChangedFiles | Should -Be 1
+        # All domains should have score 0
+        foreach ($doc in $result.AffectedDocs) {
+            $doc.Score | Should -Be 0
+        }
+    }
+
+    It "Scores 1 for trivial change to domain file" {
+        $result = Get-DocImpactScore `
+            -ChangedFiles @("AuthController.csproj") `
+            -ManifestPath $script:manifestPath -DocsRoot $script:docsRoot
+
+        $result.TotalChangedFiles | Should -Be 1
+        $result.TrivialFiles | Should -Be 1
+    }
+
+    It "Scores 3 for controller change" {
+        $result = Get-DocImpactScore `
+            -ChangedFiles @("src/Controllers/AuthController.cs") `
+            -ManifestPath $script:manifestPath -DocsRoot $script:docsRoot
+
+        $authDoc = $result.AffectedDocs | Where-Object { $_.DomainName -eq 'Auth' }
+        $authDoc | Should -Not -BeNullOrEmpty
+        $authDoc.Score | Should -Be 3
+    }
+
+    It "Returns correct skip/rerun split" {
+        $result = Get-DocImpactScore `
+            -ChangedFiles @("src/Controllers/AuthController.cs", "src/MyProject.csproj") `
+            -DiffTexts @{} `
+            -ManifestPath $script:manifestPath -DocsRoot $script:docsRoot
+
+        $result.SignificantFiles | Should -BeGreaterOrEqual 1
+        $result.RerunDocs.Count | Should -BeGreaterOrEqual 1
+    }
+
+    It "Handles missing manifest gracefully" {
+        $result = Get-DocImpactScore `
+            -ChangedFiles @("src/Controllers/AuthController.cs") `
+            -ManifestPath "C:\nonexistent\manifest.md" -DocsRoot $script:docsRoot
+
+        # Without manifest, significant files get score 2 (conservative)
+        $result.TotalChangedFiles | Should -Be 1
+        $result.AffectedDocs.Count | Should -BeGreaterOrEqual 1
+        ($result.AffectedDocs | Where-Object { $_.Score -eq 2 }).Count | Should -BeGreaterOrEqual 1
+    }
+
+    It "Handles empty changed files" {
+        $result = Get-DocImpactScore -ChangedFiles @() `
+            -ManifestPath $script:manifestPath -DocsRoot $script:docsRoot
+
+        $result.TotalChangedFiles | Should -Be 0
+        $result.AffectedDocs.Count | Should -Be 0
+        $result.SkippedDocs.Count | Should -Be 0
+        $result.RerunDocs.Count | Should -Be 0
+    }
+}

@@ -1,4 +1,4 @@
-═══════════════════════════════════════════════════════════════
+﻿═══════════════════════════════════════════════════════════════
 📋 COPILOT AGENT KNOWLEDGE LAYER — REUSABLE PLAYBOOK  v2.9
 ═══════════════════════════════════════════════════════════════
 
@@ -272,6 +272,16 @@ Prompt:
      - Existing Knowledge Assets
      - Tech Stack Summary
      - Identified Domains (features to document in Phase 2)
+     - **Navigation Guide** (layer table - updated by Build-DocRegistry):
+       ## Navigation Guide
+       | Layer | Role | Doc Path | Status |
+       |-------|------|----------|--------|
+       | L0 | Index / Anchor | Discovery_Manifest.md | ✅ |
+       | L0 | Index / Anchor | copilot-instructions.md | ✅ |
+       | L1 | Architecture | (pending Phase 1) | pending |
+       | L2 | Reference | (pending Phase 2) | pending |
+       | L3 | Workflow | (pending Phase 2) | pending |
+       (Updated by Build-DocRegistry after each phase)
      - Last Updated: «date»
 
   This is your ANCHOR — re-read its "Repo Map" and "Identified Domains"
@@ -327,9 +337,21 @@ Prompt:
         - New controller → FIRST check if existing workflow doc covers
           this domain. If found → UPDATE. ONLY if none → CREATE new doc
           using the Workflow Doc Template below
-        - After fixing → update doc_registry.md
+        - After fixing → append to .monkey-output/.doc-changes.log: UPDATE|doc/path.md|what was fixed|date
+        - Do NOT edit doc_registry.md directly — it is rebuilt by script
+
+     C. **Doc Navigation Rules** (add this section to copilot-instructions.md):
+         When answering questions, route to the correct doc layer:
+         - L0 (Discovery_Manifest, copilot-instructions): read FIRST for orientation
+         - L1 (architecture, glossary): for cross-cutting design questions
+         - L2 (reference, errors, ADRs, skills): for specific API/config/decision lookups
+         - L3 (workflows): for end-to-end flow understanding
+         If a doc has <!-- parent: X -->, also read the parent for full context.
+         Consult the Navigation Guide in Discovery_Manifest.md for the doc map.
 
      B. **Workflow Doc Template** — embed the EXACT 10+1 section standard:
+        Every workflow doc MUST start with:
+        <!-- layer: L3 | role: workflow-{domain} -->
         ## Related Docs, ## 1. Overview, ## 2. Trigger Points,
         ## 3. API Endpoints, ## 4. Request/Response Flow,
         ## 5. Sequence Diagram (MUST contain mermaid),
@@ -394,11 +416,17 @@ Prompt:
   Create testing docs in `{DOCS_ROOT}/testing/` with README index.
 
   FOLDER ROUTING (non-negotiable):
-  - Doc Type "workflow" → `{DOCS_ROOT}/workflows/`  (10-section standard)
-  - Doc Type "reference" → `{DOCS_ROOT}/reference/` (lighter: Overview + tables)
-  - Doc Type "testing" → `{DOCS_ROOT}/testing/`     (test strategy format)
-  - Doc Type "design" → `{DOCS_ROOT}/adr/`          (ADR format)
+  - Doc Type "workflow" → `{DOCS_ROOT}/workflows/`  (10-section standard, layer: L3)
+  - Doc Type "reference" → `{DOCS_ROOT}/reference/` (lighter: Overview + tables, layer: L2)
+  - Doc Type "testing" → `{DOCS_ROOT}/testing/`     (test strategy format, layer: L2)
+  - Doc Type "design" → `{DOCS_ROOT}/adr/`          (ADR format, layer: L2)
   NEVER put reference/testing/design docs in workflows/.
+
+  LAYER TAG RULE (non-negotiable):
+  Every new doc MUST begin with a layer tag comment as its first line:
+  <!-- layer: L0|L1|L2|L3 | role: short-description -->
+  Layer mapping: L0=indexes/anchors, L1=architecture/glossary,
+  L2=reference/errors/ADRs/skills, L3=workflows/testing.
 
   SCOPE: «3–5 domains, e.g., "Orders, Payments, Users"
           — small repos can list all at once»
@@ -409,6 +437,7 @@ Prompt:
   Each workflow doc MUST use this exact structure with numbered headers:
 
   ```markdown
+  <!-- layer: L3 | role: workflow-{domain} -->
   ## Related Docs
   <!-- Links to related workflow docs, ADRs, and reference docs -->
 
@@ -446,7 +475,9 @@ Prompt:
   NON-NEGOTIABLE RULES:
   - Section numbering MUST use `## N.` format (e.g., `## 1. Overview`)
   - For background workers: use "Key Components" for §2, "Key Workers" for §3
-  - Extra sections (§11+) are encouraged but §1-§10 are required
+  - NEVER add §11+ sections to a workflow doc. All content MUST fit within §1-§10
+  - If content doesn't belong in any of §1-§10, create a SEPARATE doc and link from ## Related Docs
+  - If a doc exceeds 400 lines, create a new doc for the new topic instead of appending
   - Every workflow doc MUST include at least one mermaid sequence diagram
 
   **Mermaid sequence diagram** — every §5 MUST include a ```mermaid block:
@@ -544,6 +575,12 @@ Prompt:
 
   Re-read "Repo Map" + "Identified Domains" from
   `{DOCS_ROOT}/Discovery_Manifest.md`.
+
+  NOTE ON DOC REGISTRY: The initial doc_registry.md is created by this
+  phase as a bootstrap. After the playbook run, Build-DocRegistry.ps1
+  will rebuild it deterministically (zero LLM). During the run, log all
+  doc changes to .monkey-output/.doc-changes.log instead of editing the
+  registry directly.
 
   Create `{DOCS_ROOT}/doc_registry.md` with the following structure:
 
@@ -927,6 +964,40 @@ Prompt:
 
   Reference: `azure-devops-pr-review` skill is the gold standard for
   doc-first enforcement with 🛑 STOP + checkpoint pattern.
+
+  📝 DOC CREATION RULES — EVERY skill that creates or updates docs
+  MUST include these rules in its instructions:
+
+  ```markdown
+  ## Documentation Standards
+
+  When creating or updating documentation:
+
+  1. **Layer tag required**: Every doc MUST start with:
+     `<!-- layer: L0|L1|L2|L3 | role: description -->`
+
+  2. **Workflow docs use §1-§10 only**: NEVER add §11+ sections.
+     Content MUST fit within the standard 10+1 sections:
+     Related Docs, §1 Overview, §2 Trigger Points, §3 API Endpoints,
+     §4 Request/Response Flow, §5 Sequence Diagram, §6 Key Source Files,
+     §7 Config Dependencies, §8 Telemetry, §9 How to Debug, §10 Errors
+
+  3. **Size limits**: Workflow docs must not exceed 600 lines.
+     If a doc is already over 400 lines, create a SEPARATE doc
+     and cross-reference from ## Related Docs.
+
+  4. **Track changes**: After creating/updating any doc, append to
+     `.monkey-output/.doc-changes.log`:
+     `ACTION|doc/path.md|details|YYYY-MM-DD`
+
+  5. **No direct registry edits**: doc_registry.md is rebuilt by script.
+  ```
+
+  RULES for doc creation standards:
+  - Include in coding skills, test skills, and any skill that triggers
+    doc self-healing
+  - Place AFTER the doc-first gate section
+  - Utility/styling skills (e.g. `concise`) do NOT need this section
 
   Cross-reference {DOCS_ROOT} docs. Update .github/copilot-instructions.md
   with skill list and # triggers.

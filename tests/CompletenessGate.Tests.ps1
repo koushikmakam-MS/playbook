@@ -812,3 +812,586 @@ Describe "Show-CompletenessReport" {
         { Show-CompletenessReport -GateResult $gateResult } | Should -Not -Throw
     }
 }
+
+# ═══════════════════════════════════════════════════════════════
+# TEST-CODEPOINTERS
+# ═══════════════════════════════════════════════════════════════
+
+Describe "Test-CodePointers" {
+    BeforeAll {
+        $script:testDir = Join-Path $TestDrive "code-pointers"
+        New-Item -ItemType Directory $script:testDir -Force | Out-Null
+    }
+
+    Context "Resolves valid file paths" {
+        BeforeAll {
+            $script:repoDir = Join-Path $script:testDir "valid-repo"
+            $script:srcDir  = Join-Path $script:repoDir "src\Controllers"
+            New-Item -ItemType Directory $script:srcDir -Force | Out-Null
+            "class User {}" | Set-Content (Join-Path $script:srcDir "User.cs") -Encoding UTF8
+
+            $script:docPath = Join-Path $script:repoDir "doc.md"
+            @"
+# My Doc
+
+## 6. Key Source Files
+| src/Controllers/User.cs | UserController | Handles user requests |
+
+Also see ``src/Controllers/User.cs`` inline.
+"@ | Set-Content $script:docPath -Encoding UTF8
+        }
+
+        It "All valid refs resolve" {
+            $result = Test-CodePointers -DocPath $script:docPath -RepoPath $script:repoDir
+            $result.TotalRefs    | Should -BeGreaterThan 0
+            $result.DeadRefs     | Should -Be 0
+            $result.Pass         | Should -BeTrue
+        }
+    }
+
+    Context "Detects dead references" {
+        BeforeAll {
+            $script:repoDir = Join-Path $script:testDir "dead-repo"
+            New-Item -ItemType Directory $script:repoDir -Force | Out-Null
+
+            $script:docPath = Join-Path $script:repoDir "doc.md"
+            @"
+# Doc
+See ``src/Missing.cs`` for details.
+"@ | Set-Content $script:docPath -Encoding UTF8
+        }
+
+        It "Finds dead reference" {
+            $result = Test-CodePointers -DocPath $script:docPath -RepoPath $script:repoDir
+            $result.DeadRefs | Should -BeGreaterThan 0
+            $result.DeadRefPaths | Should -Contain "src/Missing.cs"
+        }
+    }
+
+    Context "Skips URLs and anchors" {
+        BeforeAll {
+            $script:repoDir = Join-Path $script:testDir "skip-repo"
+            New-Item -ItemType Directory $script:repoDir -Force | Out-Null
+
+            $script:docPath = Join-Path $script:repoDir "doc.md"
+            @"
+# Doc
+See [link](https://example.com/file.cs) and #section for details.
+Also ``https://cdn.example.com/lib.js`` should be skipped.
+And an image: logo.png
+"@ | Set-Content $script:docPath -Encoding UTF8
+        }
+
+        It "Does not count URLs or anchors as refs" {
+            $result = Test-CodePointers -DocPath $script:docPath -RepoPath $script:repoDir
+            $result.DeadRefPaths | Should -Not -Contain "https://example.com/file.cs"
+            $result.DeadRefPaths | Should -Not -Contain "https://cdn.example.com/lib.js"
+        }
+    }
+
+    Context "Passes when dead refs below threshold" {
+        BeforeAll {
+            $script:repoDir = Join-Path $script:testDir "below-thresh"
+            $script:srcDir  = Join-Path $script:repoDir "src"
+            New-Item -ItemType Directory $script:srcDir -Force | Out-Null
+            # Create 9 real files
+            1..9 | ForEach-Object { "content" | Set-Content (Join-Path $script:srcDir "File$_.cs") -Encoding UTF8 }
+
+            $script:docPath = Join-Path $script:repoDir "doc.md"
+            $refs = (1..9 | ForEach-Object { "- ``src/File$_.cs``" }) -join "`n"
+            @"
+# Doc
+$refs
+- ``src/Missing.cs``
+"@ | Set-Content $script:docPath -Encoding UTF8
+        }
+
+        It "Passes with 1 dead out of 10" {
+            $result = Test-CodePointers -DocPath $script:docPath -RepoPath $script:repoDir
+            $result.TotalRefs | Should -Be 10
+            $result.DeadRefs  | Should -Be 1
+            $result.Pass      | Should -BeTrue
+        }
+    }
+
+    Context "Fails when dead refs above threshold" {
+        BeforeAll {
+            $script:repoDir = Join-Path $script:testDir "above-thresh"
+            $script:srcDir  = Join-Path $script:repoDir "src"
+            New-Item -ItemType Directory $script:srcDir -Force | Out-Null
+            # Create 5 real files
+            1..5 | ForEach-Object { "content" | Set-Content (Join-Path $script:srcDir "File$_.cs") -Encoding UTF8 }
+
+            $script:docPath = Join-Path $script:repoDir "doc.md"
+            $goodRefs = (1..5 | ForEach-Object { "- ``src/File$_.cs``" }) -join "`n"
+            $badRefs  = (1..5 | ForEach-Object { "- ``src/Gone$_.cs``" }) -join "`n"
+            @"
+# Doc
+$goodRefs
+$badRefs
+"@ | Set-Content $script:docPath -Encoding UTF8
+        }
+
+        It "Fails with 5 dead out of 10" {
+            $result = Test-CodePointers -DocPath $script:docPath -RepoPath $script:repoDir
+            $result.TotalRefs | Should -Be 10
+            $result.DeadRefs  | Should -Be 5
+            $result.Pass      | Should -BeFalse
+        }
+    }
+
+    Context "Handles empty doc" {
+        BeforeAll {
+            $script:repoDir = Join-Path $script:testDir "empty-doc"
+            New-Item -ItemType Directory $script:repoDir -Force | Out-Null
+
+            $script:docPath = Join-Path $script:repoDir "doc.md"
+            "" | Set-Content $script:docPath -Encoding UTF8
+        }
+
+        It "Returns 0 refs and passes" {
+            $result = Test-CodePointers -DocPath $script:docPath -RepoPath $script:repoDir
+            $result.TotalRefs | Should -Be 0
+            $result.Pass      | Should -BeTrue
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# TEST-DOCSIZE
+# ═══════════════════════════════════════════════════════════════
+
+Describe "Test-DocSize" {
+    BeforeAll {
+        $script:testDir = Join-Path $TestDrive "doc-size"
+        New-Item -ItemType Directory $script:testDir -Force | Out-Null
+
+        function script:New-SizedDoc {
+            param([string]$Path, [int]$LineCount, [string]$Prefix = "")
+            $parent = Split-Path $Path -Parent
+            if (-not (Test-Path $parent)) { New-Item -ItemType Directory $parent -Force | Out-Null }
+            $lines = @()
+            if ($Prefix) { $lines += $Prefix }
+            $remaining = $LineCount - $lines.Count
+            $lines += (1..$remaining | ForEach-Object { "Line $_" })
+            $lines | Set-Content $Path -Encoding UTF8
+        }
+    }
+
+    Context "Returns OK for short workflow doc" {
+        It "200 lines → OK" {
+            $docPath = Join-Path $script:testDir "short-wf.md"
+            New-SizedDoc -Path $docPath -LineCount 200
+            $result = Test-DocSize -DocPath $docPath -DocType 'workflow'
+            $result.Status    | Should -Be 'OK'
+            $result.LineCount | Should -Be 200
+        }
+    }
+
+    Context "Returns WARN for medium workflow doc" {
+        It "450 lines → WARN" {
+            $docPath = Join-Path $script:testDir "medium-wf.md"
+            New-SizedDoc -Path $docPath -LineCount 450
+            $result = Test-DocSize -DocPath $docPath -DocType 'workflow'
+            $result.Status | Should -Be 'WARN'
+        }
+    }
+
+    Context "Returns BLOCK for large workflow doc" {
+        It "700 lines → BLOCK" {
+            $docPath = Join-Path $script:testDir "large-wf.md"
+            New-SizedDoc -Path $docPath -LineCount 700
+            $result = Test-DocSize -DocPath $docPath -DocType 'workflow'
+            $result.Status | Should -Be 'BLOCK'
+        }
+    }
+
+    Context "Respects frontmatter override" {
+        It "max-lines: 800 with 650 lines → OK" {
+            $docPath = Join-Path $script:testDir "override-wf.md"
+            New-SizedDoc -Path $docPath -LineCount 500 -Prefix "<!-- max-lines: 800 -->"
+            $result = Test-DocSize -DocPath $docPath -DocType 'workflow'
+            $result.Status      | Should -Be 'OK'
+            $result.HasOverride | Should -BeTrue
+            $result.BlockLimit  | Should -Be 800
+        }
+    }
+
+    Context "Uses child limits for child doc" {
+        It "child doc with 300 lines → WARN" {
+            $docPath = Join-Path $script:testDir "child-wf.md"
+            New-SizedDoc -Path $docPath -LineCount 300 -Prefix "<!-- parent: ParentDoc.md -->"
+            $result = Test-DocSize -DocPath $docPath -DocType 'workflow'
+            $result.Status  | Should -Be 'WARN'
+            $result.IsChild | Should -BeTrue
+            $result.WarnLimit | Should -Be 250
+            $result.BlockLimit | Should -Be 400
+        }
+    }
+
+    Context "Uses correct limits per doc type" {
+        It "ADR limits differ from workflow limits" {
+            $adrPath = Join-Path $script:testDir "adr-doc.md"
+            New-SizedDoc -Path $adrPath -LineCount 160
+            $adrResult = Test-DocSize -DocPath $adrPath -DocType 'adr'
+            $adrResult.Status | Should -Be 'WARN'
+
+            $wfPath = Join-Path $script:testDir "wf-doc.md"
+            New-SizedDoc -Path $wfPath -LineCount 160
+            $wfResult = Test-DocSize -DocPath $wfPath -DocType 'workflow'
+            $wfResult.Status | Should -Be 'OK'
+        }
+
+        It "Reference limits are tighter than workflow" {
+            $refPath = Join-Path $script:testDir "ref-doc.md"
+            New-SizedDoc -Path $refPath -LineCount 250
+            $refResult = Test-DocSize -DocPath $refPath -DocType 'reference'
+            $refResult.Status | Should -Be 'WARN'
+
+            $wfPath2 = Join-Path $script:testDir "wf-doc2.md"
+            New-SizedDoc -Path $wfPath2 -LineCount 250
+            $wfResult2 = Test-DocSize -DocPath $wfPath2 -DocType 'workflow'
+            $wfResult2.Status | Should -Be 'OK'
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# SPLIT-OVERSIZEDDOC
+# ═══════════════════════════════════════════════════════════════
+
+Describe "Split-OversizedDoc" {
+    BeforeEach {
+        $script:splitDir = Join-Path $TestDrive "split-$(Get-Random)"
+        New-Item -ItemType Directory $script:splitDir -Force | Out-Null
+    }
+    AfterEach {
+        if (Test-Path $script:splitDir) { Remove-Item $script:splitDir -Recurse -Force }
+    }
+
+    It "splits doc with §11+ sections into parent + child" {
+        $content = @"
+<!-- layer: L3 | role: workflow-test -->
+# Test Workflow
+
+## Related Docs
+Links here
+
+## 1. Overview
+Overview text
+
+## 2. Trigger Points
+Triggers
+
+## 10. Error Scenarios
+Errors
+
+## 11. Architecture Notes
+Architecture content here
+More architecture
+
+## 12. Extended Details
+Extended content
+"@
+        $docPath = Join-Path $script:splitDir "test_workflow.md"
+        Set-Content $docPath -Value $content -Encoding UTF8
+
+        $result = Split-OversizedDoc -DocPath $docPath
+        $result.Split | Should -BeTrue
+        $result.ExtractedCount | Should -Be 2
+        # Parent should not contain §11 or §12 as actual sections
+        $parentContent = Get-Content $docPath -Raw
+        $parentContent | Should -Match '## Extended Sections'
+        # §11 should only appear in the stub list, not as a heading
+        $parentContent | Should -Not -Match '^## 11\. Architecture Notes'
+        # Child should exist with proper frontmatter
+        $childPath = Join-Path $script:splitDir "test_workflow_deep_dive.md"
+        Test-Path $childPath | Should -BeTrue
+        $childContent = Get-Content $childPath -Raw
+        $childContent | Should -Match '<!-- parent: test_workflow\.md -->'
+        $childContent | Should -Match '## 11\. Architecture Notes'
+        $childContent | Should -Match '## 12\. Extended Details'
+    }
+
+    It "returns Split=false when no extra sections exist" {
+        $content = @"
+## Related Docs
+Links
+
+## 1. Overview
+Overview
+
+## 10. Error Scenarios
+Errors
+"@
+        $docPath = Join-Path $script:splitDir "clean.md"
+        Set-Content $docPath -Value $content -Encoding UTF8
+
+        $result = Split-OversizedDoc -DocPath $docPath
+        $result.Split | Should -BeFalse
+    }
+
+    It "deduplicates repeated standard sections" {
+        $content = @"
+## 1. Overview
+First overview
+
+## 6. Key Source Files
+First source files table
+
+## 10. Error Scenarios
+Errors
+
+## 6. Key Source Files
+Duplicate source files (added by monkey)
+
+## 11. Extra Section
+Extra content
+"@
+        $docPath = Join-Path $script:splitDir "duped.md"
+        Set-Content $docPath -Value $content -Encoding UTF8
+
+        $result = Split-OversizedDoc -DocPath $docPath
+        $result.Split | Should -BeTrue
+        $result.ExtractedCount | Should -Be 2  # duplicate §6 + §11
+        $parentContent = Get-Content $docPath -Raw
+        # Parent should have only one §6 as an actual section heading (stub list may mention it)
+        $sectionHeadings = (Get-Content $docPath) | Where-Object { $_ -match '^## 6\. Key Source Files' }
+        $sectionHeadings.Count | Should -Be 1
+    }
+
+    It "extracts sub-sections like §5a §5b" {
+        $content = @"
+## 5. Sequence Diagram
+Main diagram
+
+## 5a. Recommendation Deep-Dive
+Sub content
+
+## 5b. V1 vs V2 Differences
+More sub content
+
+## 10. Error Scenarios
+Errors
+"@
+        $docPath = Join-Path $script:splitDir "subsections.md"
+        Set-Content $docPath -Value $content -Encoding UTF8
+
+        $result = Split-OversizedDoc -DocPath $docPath
+        $result.Split | Should -BeTrue
+        $result.ExtractedCount | Should -Be 2  # §5a + §5b
+    }
+
+    It "respects -DryRun flag" {
+        $content = @"
+## 1. Overview
+Text
+
+## 11. Extra
+Extra text
+"@
+        $docPath = Join-Path $script:splitDir "dryrun.md"
+        Set-Content $docPath -Value $content -Encoding UTF8
+        $originalContent = Get-Content $docPath -Raw
+
+        $result = Split-OversizedDoc -DocPath $docPath -DryRun
+        $result.Split | Should -BeTrue
+        # Files should not be modified
+        (Get-Content $docPath -Raw) | Should -Be $originalContent
+        Test-Path (Join-Path $script:splitDir "dryrun_deep_dive.md") | Should -BeFalse
+    }
+
+    It "preserves preamble lines before first heading" {
+        $content = @"
+<!-- layer: L3 | role: workflow-test -->
+# My Workflow Title
+
+Some intro text before sections.
+
+## 1. Overview
+Overview
+
+## 11. Extra Section
+Extra
+"@
+        $docPath = Join-Path $script:splitDir "preamble.md"
+        Set-Content $docPath -Value $content -Encoding UTF8
+
+        $result = Split-OversizedDoc -DocPath $docPath
+        $result.Split | Should -BeTrue
+        $parentContent = Get-Content $docPath -Raw
+        $parentContent | Should -Match 'layer: L3'
+        $parentContent | Should -Match '# My Workflow Title'
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# TEST-PARENTCHILDCOMPLETENESS
+# ═══════════════════════════════════════════════════════════════
+
+Describe "Test-ParentChildCompleteness" {
+    BeforeAll {
+        $script:testDir = Join-Path $TestDrive "parent-child"
+        New-Item -ItemType Directory $script:testDir -Force | Out-Null
+
+        # Define a compact set of required sections for testing
+        $script:testSections = @(
+            @{ Number = 1;  Pattern = '##\s*1\.\s*Overview';     Name = 'Overview' }
+            @{ Number = 2;  Pattern = '##\s*2\.\s*Triggers';     Name = 'Triggers' }
+            @{ Number = 3;  Pattern = '##\s*3\.\s*API';          Name = 'API' }
+            @{ Number = 4;  Pattern = '##\s*4\.\s*Flow';         Name = 'Flow' }
+            @{ Number = 5;  Pattern = '##\s*5\.\s*Diagram';      Name = 'Diagram' }
+            @{ Number = 6;  Pattern = '##\s*6\.\s*Source';       Name = 'Source' }
+            @{ Number = 7;  Pattern = '##\s*7\.\s*Config';       Name = 'Config' }
+            @{ Number = 8;  Pattern = '##\s*8\.\s*Telemetry';    Name = 'Telemetry' }
+            @{ Number = 9;  Pattern = '##\s*9\.\s*Debug';        Name = 'Debug' }
+            @{ Number = 10; Pattern = '##\s*10\.\s*Errors';      Name = 'Errors' }
+        )
+    }
+
+    Context "Aggregates sections across parent and child" {
+        BeforeAll {
+            $script:repoDir  = Join-Path $script:testDir "agg-repo"
+            $script:docsDir  = Join-Path $script:repoDir "docs"
+            New-Item -ItemType Directory $script:docsDir -Force | Out-Null
+
+            $script:parentPath = Join-Path $script:docsDir "parent.md"
+            @"
+# Parent Doc
+## 1. Overview
+Content.
+## 2. Triggers
+Content.
+## 3. API
+Content.
+## 4. Flow
+Content.
+## 5. Diagram
+Content.
+
+## Child Docs
+| Path | Description |
+|------|-------------|
+| child.md | Remaining sections |
+"@ | Set-Content $script:parentPath -Encoding UTF8
+
+            $script:childPath = Join-Path $script:docsDir "child.md"
+            @"
+# Child Doc
+## 6. Source
+Content.
+## 7. Config
+Content.
+## 8. Telemetry
+Content.
+## 9. Debug
+Content.
+## 10. Errors
+Content.
+"@ | Set-Content $script:childPath -Encoding UTF8
+        }
+
+        It "All 10 sections found across family" {
+            $result = Test-ParentChildCompleteness -ParentDocPath $script:parentPath -RepoPath $script:repoDir -RequiredSections $script:testSections
+            $result.TotalPresent    | Should -Be 10
+            $result.MissingSections | Should -HaveCount 0
+            $result.Pass            | Should -BeTrue
+            $result.ChildDocs       | Should -HaveCount 1
+        }
+    }
+
+    Context "Reports missing sections" {
+        BeforeAll {
+            $script:repoDir  = Join-Path $script:testDir "missing-repo"
+            $script:docsDir  = Join-Path $script:repoDir "docs"
+            New-Item -ItemType Directory $script:docsDir -Force | Out-Null
+
+            $script:parentPath = Join-Path $script:docsDir "parent.md"
+            @"
+# Parent Doc
+## 1. Overview
+Content.
+## 2. Triggers
+Content.
+## 3. API
+Content.
+
+## Child Docs
+| Path | Description |
+|------|-------------|
+| child.md | Partial sections |
+"@ | Set-Content $script:parentPath -Encoding UTF8
+
+            $script:childPath = Join-Path $script:docsDir "child.md"
+            @"
+# Child Doc
+## 6. Source
+Content.
+## 7. Config
+Content.
+## 8. Telemetry
+Content.
+"@ | Set-Content $script:childPath -Encoding UTF8
+        }
+
+        It "Reports 4 missing sections" {
+            $result = Test-ParentChildCompleteness -ParentDocPath $script:parentPath -RepoPath $script:repoDir -RequiredSections $script:testSections
+            $result.Pass            | Should -BeFalse
+            $result.MissingSections | Should -HaveCount 4
+            $result.MissingSections | Should -Contain 'Flow'
+            $result.MissingSections | Should -Contain 'Diagram'
+            $result.MissingSections | Should -Contain 'Debug'
+            $result.MissingSections | Should -Contain 'Errors'
+        }
+    }
+
+    Context "Handles parent with no children" {
+        BeforeAll {
+            $script:repoDir  = Join-Path $script:testDir "no-child-repo"
+            $script:docsDir  = Join-Path $script:repoDir "docs"
+            New-Item -ItemType Directory $script:docsDir -Force | Out-Null
+
+            $script:parentPath = Join-Path $script:docsDir "parent.md"
+            @"
+# Parent Doc
+## 1. Overview
+Content.
+## 2. Triggers
+Content.
+"@ | Set-Content $script:parentPath -Encoding UTF8
+        }
+
+        It "Counts only parent sections" {
+            $result = Test-ParentChildCompleteness -ParentDocPath $script:parentPath -RepoPath $script:repoDir -RequiredSections $script:testSections
+            $result.ChildDocs      | Should -HaveCount 0
+            $result.TotalPresent   | Should -Be 2
+            $result.Pass           | Should -BeFalse
+        }
+    }
+
+    Context "Handles missing child file gracefully" {
+        BeforeAll {
+            $script:repoDir  = Join-Path $script:testDir "missing-child-repo"
+            $script:docsDir  = Join-Path $script:repoDir "docs"
+            New-Item -ItemType Directory $script:docsDir -Force | Out-Null
+
+            $script:parentPath = Join-Path $script:docsDir "parent.md"
+            @"
+# Parent Doc
+## 1. Overview
+Content.
+
+## Child Docs
+| Path | Description |
+|------|-------------|
+| nonexistent.md | Does not exist |
+"@ | Set-Content $script:parentPath -Encoding UTF8
+        }
+
+        It "Skips missing child without crashing" {
+            $result = Test-ParentChildCompleteness -ParentDocPath $script:parentPath -RepoPath $script:repoDir -RequiredSections $script:testSections
+            @($result.ChildDocs | Where-Object { $_ }).Count | Should -Be 0
+            $result.TotalPresent | Should -Be 1
+        }
+    }
+}

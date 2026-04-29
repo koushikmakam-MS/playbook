@@ -157,11 +157,14 @@ Then RUN the autonomous loop — no more human interaction needed:
     Read the controller source AND its BL layer (follow the call
     chain 2+ levels deep). Fill in REAL data — no placeholders.
     Every doc MUST have at least one mermaid sequence diagram.
-  - For each "Add to" action: read the controller, then add a new
-    section to the existing doc covering that controller's APIs,
-    flow, config, errors.
+    NEVER add §11+ sections — all content MUST fit within §1-§10.
+    If the doc is already over 400 lines, create a SEPARATE doc instead.
+  - For each "Add to" action: read the controller, then update the
+    MATCHING §1-§10 section in the existing doc (do NOT append §11+).
+    If content doesn't fit §1-§10, create a new doc and cross-ref it.
   - Update the workflow README.md indexes.
-  - Update doc_registry.md with new entries.
+  - Append to .monkey-output/.doc-changes.log: ADD|doc/path.md|controllers covered|date
+  - Every new doc MUST start with <!-- layer: L3 | role: workflow -->
   - Print: "📝 Created: [doc path] covering [controllers]"
     or "📝 Extended: [doc path] with [controller] section"
 
@@ -329,15 +332,12 @@ AFTER ALL DOMAINS, print the final scorecard:
   - If ✅ 70–89%: "Docs need work. Run another round on ❌ domains."
   - If ✅ < 70%: "Significant gaps. Consider re-running Phase 2 and 4."
 
-  DOC REGISTRY UPDATE (mandatory final step):
-  After printing the scorecard, update docs/{KB_NAME}/doc_registry.md:
-  1. For each domain explored, update the "Last Verified" column with today's date
-  2. For each domain with 100% ✅, set "All 14 Sections?" to ✅
-  3. For each domain with ⚠️ or ❌, set "All 14 Sections?" to ⚠️ and note gaps
-  4. If any controller/feature was discovered that has no row in the registry, add it
-  5. Move controllers from "Undocumented" to "Documented" if Pass 0 created docs for them
-  6. Update the Coverage Summary table at the bottom with current totals
-  7. Print: "📋 Updated doc_registry.md with audit results"
+  DOC CHANGE LOG (mandatory final step):
+  After printing the scorecard, append to .monkey-output/.doc-changes.log:
+  1. For each doc created: ADD|doc/path.md|controllers covered|date
+  2. For each doc updated: UPDATE|doc/path.md|sections added/fixed|date
+  3. Print: "📋 Logged changes to .doc-changes.log (registry rebuilt by script)"
+  NOTE: Do NOT edit doc_registry.md directly — it is rebuilt deterministically by Build-DocRegistry.
 
 RULES:
   - DISCOVER FIRST: If discovery mode = full, Pass 0 MUST run before

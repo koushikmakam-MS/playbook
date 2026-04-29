@@ -595,14 +595,37 @@ function Invoke-CopilotBatch {
         $trackingRules = @()
         if ($wfDir) { $trackingRules += "- After creating a doc in ``$wfDir/``, add an entry to ``$wfDir/README.md`` index table" }
         if ($adrDir) { $trackingRules += "- After creating a doc in ``$adrDir/``, add an entry to ``$adrDir/README.md`` index table" }
-        if ($rootDoc) { $trackingRules += "- After creating any new doc, add it to ``$rootDoc/doc_registry.md`` if that file exists" }
+        $trackingRules += "- After creating or modifying ANY doc, append one line to ``.monkey-output/.doc-changes.log``: ACTION|doc/path.md|details|$(Get-Date -Format yyyy-MM-dd) (ACTION = ADD, UPDATE, or DELETE). Do NOT edit doc_registry.md directly — it is rebuilt by script"
+
+        # Layer tagging rules
+        $layerRules = @(
+            "- Every new doc MUST start with a layer tag: <!-- layer: L0|L1|L2|L3 | role: description -->"
+            "- Layer assignment: L0 = anchors/indexes, L1 = architecture/glossary, L2 = reference/errors/ADRs/skills, L3 = workflows/flows"
+            "- If the doc has a parent doc, also add: <!-- parent: parent_filename.md -->"
+        )
+
+        # Parent/child routing rules
+        $parentChildRules = @(
+            "- If a doc has <!-- parent: X --> frontmatter, this is a CHILD doc — update THIS child only, not the parent"
+            "- If a doc has ## Child Docs section, route edits to the correct child doc (not the parent)"
+        )
+
+        # Anti-bloat rules (prevent §11+ section creep)
+        $antiBloatRules = @(
+            "- NEVER add new numbered sections (§11, §12, etc.) to a workflow doc. Content MUST go into the matching §1-§10 section"
+            "- If the content does not fit any of §1-§10, create a SEPARATE doc for that topic instead of appending to an existing doc"
+            "- If a doc is already over 400 lines, do NOT append to it — create a new doc and cross-reference it from the Related Docs section"
+        )
 
         if ($routingRules.Count -gt 0) {
             $trackingBlock = ""
             if ($trackingRules.Count -gt 0) {
-                $trackingBlock = "`nAfter creating or updating docs, update these tracking files:`n$($trackingRules -join "`n")"
+                $trackingBlock = "`nAfter creating or updating docs:`n$($trackingRules -join "`n")"
             }
-            $docDirHint = ". IMPORTANT — place new doc files in the correct subfolder:`n$($routingRules -join "`n")`nMatch the naming convention of existing files in each folder (e.g. numbered prefixes like 07_*, snake_case, kebab-case). NEVER create docs in the root docs folder${trackingBlock}"
+            $layerBlock = "`nLayer tagging (mandatory for all new docs):`n$($layerRules -join "`n")"
+            $parentChildBlock = "`nParent/child doc routing:`n$($parentChildRules -join "`n")"
+            $antiBloatBlock = "`nSection discipline (non-negotiable):`n$($antiBloatRules -join "`n")"
+            $docDirHint = ". IMPORTANT — place new doc files in the correct subfolder:`n$($routingRules -join "`n")`nMatch the naming convention of existing files in each folder (e.g. numbered prefixes like 07_*, snake_case, kebab-case). NEVER create docs in the root docs folder${trackingBlock}${layerBlock}${parentChildBlock}${antiBloatBlock}"
         } else {
             $topDirs = $DocDirectories | Select-Object -First 5
             $docDirHint = " in these doc directories: $($topDirs -join ', ')"
@@ -1749,15 +1772,16 @@ function Invoke-SingleQuestion {
         if ($exDir)  { $routingRules += "exemplars/implementation guides → ``$exDir/``" }
 
         if ($routingRules.Count -gt 0) {
-            # Build tracking file update hint
+            # Build tracking file update hint (append to .doc-changes.log, not doc_registry)
             $trackingHints = @()
             if ($wfDir) { $trackingHints += "update ``$wfDir/README.md`` index" }
             if ($adrDir) { $trackingHints += "update ``$adrDir/README.md`` index" }
-            $rootDoc = $DocDirectories | Where-Object { $_ -notmatch 'workflows|adr|exemplar|security|bug' } | Select-Object -First 1
-            if ($rootDoc) { $trackingHints += "update ``$rootDoc/doc_registry.md``" }
-            $trackingSuffix = if ($trackingHints.Count -gt 0) { ". After creating docs: $($trackingHints -join '; ')" } else { "" }
+            $trackingHints += "append to ``.monkey-output/.doc-changes.log``: ACTION|path|details|date"
+            $trackingSuffix = ". After creating/updating docs: $($trackingHints -join '; ')"
 
-            $singleDocDirHint = ". Place new docs in the correct subfolder: $($routingRules -join '; '). Match existing naming conventions (numbered prefixes, snake_case, etc). NEVER create docs in the root docs folder${trackingSuffix}"
+            $layerHint = ". Every new doc MUST start with <!-- layer: L0|L1|L2|L3 | role: description -->. If editing a child doc (has <!-- parent: X -->), update only the child"
+            $antiBloatHint = ". NEVER add §11+ sections to workflow docs — content MUST go into §1-§10. If it doesn't fit, create a separate doc. If doc is over 400 lines, create a new doc instead of appending"
+            $singleDocDirHint = ". Place new docs in the correct subfolder: $($routingRules -join '; '). Match existing naming conventions (numbered prefixes, snake_case, etc). NEVER create docs in the root docs folder${trackingSuffix}${layerHint}${antiBloatHint}"
         } else {
             $topDirs = $DocDirectories | Select-Object -First 5
             $singleDocDirHint = " in these doc directories: $($topDirs -join ', ')"
@@ -2549,6 +2573,387 @@ function Get-MonkeyPacks {
     return $script:MonkeyPacks
 }
 
+# ─────────────────────────────────────────────
+# Region: Significance Detection / Doc-Impact Scoring
+# ─────────────────────────────────────────────
+
+# File extensions considered inherently trivial (build/config plumbing)
+$script:TrivialExtensions = @(
+    '.csproj', '.sln', '.props', '.targets',
+    '.editorconfig', '.gitignore', '.gitattributes'
+)
+
+# Patterns that indicate significance when found in added diff lines
+$script:SignificantMethodPatterns = @(
+    'public\s+\S+\s+\w+\s*\('    # C# / Java public methods
+    '\bfunction\s+\w+'            # PowerShell / JS function declarations
+    '\bdef\s+\w+'                 # Python def
+    '\bfunc\s+\w+'                # Go func
+)
+
+$script:SignificantFilePatterns = @(
+    'Controller', 'Handler', 'Route', 'Endpoint'
+)
+
+$script:DependencyFiles = @(
+    'package.json', 'requirements.txt', 'go.mod', 'go.sum',
+    'Pipfile', 'Pipfile.lock', 'yarn.lock', 'package-lock.json'
+)
+
+function Get-FileChangeSignificance {
+    <#
+    .SYNOPSIS
+        Classifies a single file change as TRIVIAL or SIGNIFICANT.
+        Private helper — not exported.
+    .PARAMETER FilePath
+        Relative path of the changed file.
+    .PARAMETER DiffContent
+        The actual diff text for this file (optional).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$FilePath,
+
+        [string]$DiffContent = ''
+    )
+
+    $ext = [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()
+    $fileName = [System.IO.Path]::GetFileName($FilePath)
+    $normalPath = $FilePath.Replace('\', '/')
+
+    # ── Trivial-by-extension ──
+    if ($ext -in $script:TrivialExtensions) {
+        return @{
+            FilePath       = $FilePath
+            Classification = 'TRIVIAL'
+            Reason         = "File extension '$ext' is build/config plumbing"
+        }
+    }
+
+    # ── Significant: dependency manifest ──
+    if ($fileName -in $script:DependencyFiles) {
+        return @{
+            FilePath       = $FilePath
+            Classification = 'SIGNIFICANT'
+            Reason         = "Dependency manifest '$fileName' changed"
+        }
+    }
+
+    # ── Significant: .csproj PackageReference (dependency addition) ──
+    if ($ext -eq '.csproj' -and $DiffContent -match 'PackageReference') {
+        return @{
+            FilePath       = $FilePath
+            Classification = 'SIGNIFICANT'
+            Reason         = 'PackageReference change in project file'
+        }
+    }
+
+    # ── Significant: controller / handler / route file ──
+    foreach ($pat in $script:SignificantFilePatterns) {
+        if ($fileName -match $pat) {
+            return @{
+                FilePath       = $FilePath
+                Classification = 'SIGNIFICANT'
+                Reason         = "File name matches significant pattern '$pat'"
+            }
+        }
+    }
+
+    # ── Significant: config file in config-related path ──
+    if ($ext -in @('.json', '.yaml', '.yml', '.env', '.config')) {
+        if ($normalPath -match '(?i)config|settings|appsettings|environment') {
+            return @{
+                FilePath       = $FilePath
+                Classification = 'SIGNIFICANT'
+                Reason         = "Config file '$fileName' in config-related path"
+            }
+        }
+    }
+
+    # ── Diff-based classification (only when diff text is available) ──
+    if ($DiffContent) {
+        # Extract added/removed lines (ignore diff headers)
+        $changedLines = @($DiffContent -split "`n" |
+            Where-Object { $_ -match '^[+-]' -and $_ -notmatch '^[+-]{3}\s' })
+
+        # Strip leading +/- for content analysis
+        $contentLines = @($changedLines | ForEach-Object { $_.Substring(1).Trim() } |
+            Where-Object { $_ -ne '' })
+
+        if ($contentLines.Count -eq 0) {
+            return @{
+                FilePath       = $FilePath
+                Classification = 'TRIVIAL'
+                Reason         = 'Diff contains only empty/whitespace changes'
+            }
+        }
+
+        # Check if diff only touches comments
+        $commentPattern = '^\s*(//|#|\*|--|<!--)'
+        $allComments = @($contentLines | Where-Object { $_ -notmatch $commentPattern }).Count -eq 0
+        if ($allComments) {
+            return @{
+                FilePath       = $FilePath
+                Classification = 'TRIVIAL'
+                Reason         = 'Diff only modifies comments'
+            }
+        }
+
+        # Check if diff only touches using/import statements with no new namespaces
+        $importPattern = '^\s*(using\s|import\s|from\s\S+\simport)'
+        $allImports = @($contentLines | Where-Object { $_ -notmatch $importPattern }).Count -eq 0
+        if ($allImports) {
+            $addedImports = @($changedLines | Where-Object { $_ -match '^\+' } |
+                ForEach-Object { $_.Substring(1).Trim() } | Where-Object { $_ -match $importPattern })
+            $removedImports = @($changedLines | Where-Object { $_ -match '^\-' } |
+                ForEach-Object { $_.Substring(1).Trim() } | Where-Object { $_ -match $importPattern })
+            if ($addedImports.Count -le $removedImports.Count) {
+                return @{
+                    FilePath       = $FilePath
+                    Classification = 'TRIVIAL'
+                    Reason         = 'Diff only rearranges using/import statements'
+                }
+            }
+        }
+
+        # Check for significant patterns in added lines
+        $addedLines = @($changedLines | Where-Object { $_ -match '^\+' } |
+            ForEach-Object { $_.Substring(1) })
+
+        foreach ($pat in $script:SignificantMethodPatterns) {
+            if ($addedLines -match $pat) {
+                return @{
+                    FilePath       = $FilePath
+                    Classification = 'SIGNIFICANT'
+                    Reason         = "New method/function added (pattern: $pat)"
+                }
+            }
+        }
+
+        # Check for error-handling changes
+        if ($addedLines -match '\b(catch|throw|raise|panic)\b') {
+            return @{
+                FilePath       = $FilePath
+                Classification = 'SIGNIFICANT'
+                Reason         = 'Error handling logic changed'
+            }
+        }
+
+        # Test directory with no new test methods
+        if ($normalPath -match '(?i)(^|/)tests?/') {
+            $hasNewTests = $addedLines -match '(?i)(\[Test\]|\[Fact\]|\[Theory\]|def test_|it\s*\(|describe\s*\(|func\s+Test)'
+            if (-not $hasNewTests) {
+                return @{
+                    FilePath       = $FilePath
+                    Classification = 'TRIVIAL'
+                    Reason         = 'Test file change with no new test methods'
+                }
+            }
+        }
+    }
+
+    # ── Default: SIGNIFICANT (conservative) ──
+    return @{
+        FilePath       = $FilePath
+        Classification = 'SIGNIFICANT'
+        Reason         = 'Default classification (conservative)'
+    }
+}
+
+function Get-DocImpactScore {
+    <#
+    .SYNOPSIS
+        For a set of changed files, determines which workflow docs are affected
+        and scores the impact (0–3).
+    .PARAMETER ChangedFiles
+        Array of relative file paths.
+    .PARAMETER DiffTexts
+        Hashtable of FilePath → diff text (optional).
+    .PARAMETER ManifestPath
+        Path to Discovery_Manifest.md.
+    .PARAMETER DocsRoot
+        Path to docs root directory.
+    .OUTPUTS
+        Hashtable with TotalChangedFiles, TrivialFiles, SignificantFiles,
+        AffectedDocs, SkippedDocs, RerunDocs.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [string[]]$ChangedFiles,
+
+        [hashtable]$DiffTexts = @{},
+
+        [string]$ManifestPath = '',
+
+        [string]$DocsRoot = ''
+    )
+
+    # ── Empty input fast path ──
+    if (-not $ChangedFiles -or $ChangedFiles.Count -eq 0) {
+        Write-Step "No changed files — nothing to score" "SKIP"
+        return @{
+            TotalChangedFiles = 0
+            TrivialFiles      = 0
+            SignificantFiles  = 0
+            AffectedDocs      = @()
+            SkippedDocs       = @()
+            RerunDocs         = @()
+        }
+    }
+
+    # ── 1. Classify every changed file ──
+    $classifications = @()
+    foreach ($f in $ChangedFiles) {
+        $diff = if ($DiffTexts.ContainsKey($f)) { $DiffTexts[$f] } else { '' }
+        $classifications += Get-FileChangeSignificance -FilePath $f -DiffContent $diff
+    }
+
+    $trivialFiles      = @($classifications | Where-Object { $_.Classification -eq 'TRIVIAL' })
+    $significantFiles   = @($classifications | Where-Object { $_.Classification -eq 'SIGNIFICANT' })
+
+    Write-Step "Significance: $($trivialFiles.Count) trivial, $($significantFiles.Count) significant out of $($ChangedFiles.Count) files" "INFO"
+
+    # ── 2. Parse Discovery_Manifest.md ──
+    $domains = @()
+    if ($ManifestPath -and (Test-Path $ManifestPath)) {
+        try {
+            $manifestLines = Get-Content $ManifestPath -Encoding UTF8
+            foreach ($line in $manifestLines) {
+                # Match table rows: | # | Domain Name | Entry Points | ...
+                if ($line -match '^\|\s*\d+\s*\|') {
+                    $cols = $line -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+                    if ($cols.Count -ge 6) {
+                        $domainName   = $cols[1]
+                        $entryPoints  = @($cols[2] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                        $workflowDoc  = $cols[5].Trim()
+                        $domains += @{
+                            Name         = $domainName
+                            EntryPoints  = $entryPoints
+                            WorkflowDoc  = $workflowDoc
+                        }
+                    }
+                }
+            }
+            Write-Step "Manifest: parsed $($domains.Count) domain(s)" "OK"
+        }
+        catch {
+            Write-Step "Failed to parse manifest: $_" "WARN"
+        }
+    }
+    else {
+        Write-Step "No manifest found — using conservative scoring (all significant files get score 2)" "WARN"
+    }
+
+    # ── 3 & 4. Map changed files → domains → docs ──
+    $affectedDocs = @()
+
+    if ($domains.Count -gt 0) {
+        foreach ($domain in $domains) {
+            $docPath = ''
+            if ($DocsRoot -and $domain.WorkflowDoc) {
+                $candidate = Join-Path $DocsRoot "workflows" $domain.WorkflowDoc
+                if (Test-Path $candidate) {
+                    $docPath = $candidate
+                }
+                else {
+                    # Try directly under DocsRoot
+                    $candidate2 = Join-Path $DocsRoot $domain.WorkflowDoc
+                    if (Test-Path $candidate2) { $docPath = $candidate2 }
+                }
+            }
+
+            # Find which changed files belong to this domain
+            $domainFiles = @()
+            $domainScore = 0
+            $isEntryPointHit = $false
+
+            foreach ($c in $classifications) {
+                $normFile = $c.FilePath.Replace('\', '/')
+                $matched = $false
+
+                # Match by entry-point file name
+                foreach ($ep in $domain.EntryPoints) {
+                    if ($normFile -match [regex]::Escape($ep)) {
+                        $matched = $true
+                        if ($c.Classification -eq 'SIGNIFICANT') {
+                            $isEntryPointHit = $true
+                        }
+                        break
+                    }
+                }
+
+                # Match by shared directory path (entry-point directory contains changed file)
+                if (-not $matched) {
+                    foreach ($ep in $domain.EntryPoints) {
+                        $epDir = ($ep.Replace('\', '/') -split '/')[0..(($ep.Replace('\', '/') -split '/').Count - 2)] -join '/'
+                        if ($epDir -and $normFile.StartsWith($epDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+                            $matched = $true
+                            break
+                        }
+                    }
+                }
+
+                if ($matched) {
+                    $domainFiles += $c
+                }
+            }
+
+            # ── 5. Score the doc ──
+            if ($domainFiles.Count -eq 0) {
+                $domainScore = 0
+                $reason = 'No changed files affect this domain'
+            }
+            elseif ($isEntryPointHit) {
+                $domainScore = 3
+                $reason = 'SIGNIFICANT change to an entry-point file'
+            }
+            elseif (@($domainFiles | Where-Object { $_.Classification -eq 'SIGNIFICANT' }).Count -gt 0) {
+                $domainScore = 2
+                $reason = 'SIGNIFICANT change to domain file (not an entry point)'
+            }
+            else {
+                $domainScore = 1
+                $reason = 'Only TRIVIAL changes in this domain'
+            }
+
+            $affectedDocs += @{
+                DocPath       = $docPath
+                DomainName    = $domain.Name
+                Score         = $domainScore
+                AffectedFiles = @($domainFiles | ForEach-Object { $_.FilePath })
+                Reason        = $reason
+            }
+        }
+    }
+    else {
+        # No manifest — treat every significant file as score 2
+        if ($significantFiles.Count -gt 0) {
+            $affectedDocs += @{
+                DocPath       = ''
+                DomainName    = '(unknown)'
+                Score         = 2
+                AffectedFiles = @($significantFiles | ForEach-Object { $_.FilePath })
+                Reason        = 'No manifest available — conservative score for significant files'
+            }
+        }
+    }
+
+    $skippedDocs = @($affectedDocs | Where-Object { $_.Score -le 1 } | ForEach-Object { $_.DocPath })
+    $rerunDocs   = @($affectedDocs | Where-Object { $_.Score -ge 2 } | ForEach-Object { $_.DocPath })
+
+    Write-Step "Impact: $($rerunDocs.Count) doc(s) to re-run, $($skippedDocs.Count) skippable" "OK"
+
+    return @{
+        TotalChangedFiles = $ChangedFiles.Count
+        TrivialFiles      = $trivialFiles.Count
+        SignificantFiles  = $significantFiles.Count
+        AffectedDocs      = $affectedDocs
+        SkippedDocs       = $skippedDocs
+        RerunDocs         = $rerunDocs
+    }
+}
+
 # Export all public functions
 Export-ModuleMember -Function @(
     'Write-MonkeyBanner'
@@ -2588,4 +2993,5 @@ Export-ModuleMember -Function @(
     'Get-ArmyConfig'
     'Get-MonkeyById'
     'Get-MonkeyPacks'
+    'Get-DocImpactScore'
 )

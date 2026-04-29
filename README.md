@@ -2,7 +2,7 @@
 
 > *Give any codebase to the Monkey Army. Get production-grade documentation back.*
 
-A self-orchestrating documentation pipeline powered by **9 specialized AI agents** ("monkeys") and a **knowledge layer generator** — all driven by GitHub Copilot CLI. Works on **any codebase, any language**. Zero manual config.
+A self-orchestrating documentation pipeline powered by **9 specialized AI agents** ("monkeys") and a **DAG-complete knowledge layer generator** — all driven by GitHub Copilot CLI. Works on **any codebase, any language**. Zero manual config.
 
 ```powershell
 # One repo
@@ -80,9 +80,21 @@ playbook/
 │   ├── MonkeyCommon.psm1       ←   Core engine (retry, model, reporting, wizard, UI)
 │   ├── GitProviders.psm1       ←   Pluggable git (ADO, GitHub, GitLab, plain git)
 │   ├── DocHealthScorer.psm1    ←   Before/after doc health scoring (0–110)
-│   └── CompletenessGate.psm1   ←   Contract-based completeness validation (DAG-like)
+│   ├── CompletenessGate.psm1   ←   DAG-completeness validation + auto-split
+│   ├── DocLayers.psm1          ←   L0–L3 layer classification & tagging
+│   ├── DocRegistry.psm1        ←   Deterministic doc registry builder
+│   └── RetrofitHelpers.psm1    ←   5-pass retrofit for existing repos
 │
 ├── Run-Remediation.ps1         ← 🔧 Targeted remediation runner
+├── Run-Retrofit.ps1            ← 🔄 Retrofit orchestrator (layers, nav, registry, pointers, sizing)
+│
+├── tests/                      ← 🧪 Pester test suite (323 tests)
+│   ├── CompletenessGate.Tests.ps1
+│   ├── DocLayers.Tests.ps1
+│   ├── DocRegistry.Tests.ps1
+│   ├── MonkeyCommon.Tests.ps1
+│   ├── Retrofit.Tests.ps1
+│   └── ...
 │
 └── prompts/                    ← 📝 AI prompts
     ├── playbook.txt            ←   75KB knowledge layer mega-prompt (7 phases)
@@ -120,6 +132,9 @@ flowchart TB
         S1["MonkeyCommon.psm1<br/><i>retry, model, reporting, wizard</i>"]
         S2["GitProviders.psm1<br/><i>ADO, GitHub, GitLab, git</i>"]
         S3["DocHealthScorer.psm1<br/><i>before/after scoring</i>"]
+        S4["CompletenessGate.psm1<br/><i>DAG validation + auto-split</i>"]
+        S5["DocLayers.psm1<br/><i>L0–L3 layer tagging</i>"]
+        S6["DocRegistry.psm1<br/><i>deterministic registry</i>"]
     end
 
     monkeys --> shared
@@ -335,7 +350,7 @@ Use `-ParallelGen` to run the question generation phase for all 7 prompt-mode mo
 .\Run-Player.ps1 -RepoPath "C:\myrepo" -Pack full -ParallelGen -CommitMode commit
 ```
 
-> **Note:** Parallel gen is API-bound — if your Copilot rate limit is shared across concurrent calls, you may see diminishing returns beyond 2–3 parallel jobs. A `-MaxParallelJobs` parameter is planned for fine-tuning concurrency.
+> **Note:** Parallel gen is API-bound — if your Copilot rate limit is shared across concurrent calls, you may see diminishing returns beyond 2–3 parallel jobs. Use `-MaxParallelJobs` to cap concurrency (default: 3).
 
 ### 🔄 Checkpoint / Resume
 
@@ -410,9 +425,9 @@ Batch execution includes a circuit breaker that protects against cascading failu
 - The run can be resumed with `-Resume` after the issue is resolved
 - Each batch also checks for file changes and commits them incrementally ("self-healing commits")
 
-### 🧹 Phase 9 — Post-Run Cleanup
+### 🧹 Phase 9 — Post-Run Cleanup & DAG Finalization
 
-After all monkeys complete, Phase 9 automatically cleans up the generated documentation:
+After all monkeys complete, Phase 9 automatically cleans up and finalizes the documentation layer:
 
 | Step | What it does |
 |------|-------------|
@@ -421,6 +436,8 @@ After all monkeys complete, Phase 9 automatically cleans up the generated docume
 | **Orphan Removal** | Removes docs where ALL code references are dead |
 | **Index Rebuild** | Auto-generates README.md for each doc folder |
 | **Score Guard** | Reverts cleanup if health score drops more than 5 points |
+| **Registry Rebuild** | Deterministic `doc_registry.md` from filesystem (replaces LLM-built) |
+| **Auto-Split** | Splits BLOCK-level workflow docs (>600 lines) into parent + `*_deep_dive.md` |
 
 Phase 9 is automatic and only runs cleanup steps that the preflight determines are needed.
 
@@ -442,16 +459,26 @@ Every question sent to Copilot includes a suffix that triggers **doc self-healin
 | Answer rate | ≥ 50% | Block commit |
 | File changes | > 0 | Warning only |
 
-### Completeness Gate (DAG-like Guarantees)
+### Completeness Gate (DAG-Complete Guarantees)
 
-After monkeys run, a **contract-based completeness gate** validates every domain in your knowledge layer — providing the same fullness, completeness, and predictability guarantees as a DAG-based system, without the DAG complexity.
+After monkeys run, a **DAG-completeness gate** validates every dimension of your knowledge layer — ensuring fullness, navigability, and structural integrity.
 
-**How it works:**
+**7-dimension validation:**
 
-1. **Parse manifest** — reads `Discovery_Manifest.md` to build typed contracts per domain
-2. **Validate filesystem** — checks each doc exists, has required sections (`## 1. Overview` through `## 10. Error Scenarios`), and includes a mermaid sequence diagram
-3. **Generate remediation queue** — items are typed: `CREATE_DOC`, `ADD_SECTION`, `ADD_MERMAID`
-4. **Bounded heal loop** — max 2 auto-fix passes with must-improve rule (stops if no progress)
+| Dimension | What it checks | Module |
+|-----------|---------------|--------|
+| **Layer Tags** | Every doc has `<!-- layer: L0–L3 \| role: ... -->` metadata | DocLayers.psm1 |
+| **Navigation Guide** | `Discovery_Manifest.md` contains a quick-start navigation guide | DocLayers.psm1 |
+| **Doc Registry** | `doc_registry.md` exists and is deterministically built | DocRegistry.psm1 |
+| **Code Pointers** | `## 6. Key Source Files` refs point to real files on disk | CompletenessGate.psm1 |
+| **Doc Sizing** | Workflow docs stay under limits (WARN: 400, BLOCK: 600 lines) | CompletenessGate.psm1 |
+| **Parent/Child** | Oversized docs are split into parent + `*_deep_dive.md` companion | CompletenessGate.psm1 |
+| **Section Contract** | Required sections (§1–§10) present per doc type | CompletenessGate.psm1 |
+
+**Anti-bloat rules (enforced at 3 layers):**
+- Monkey prompts: never add §11+ sections, content must fit §1–§10
+- Playbook template: size limits in SKILL doc creation rules
+- Phase 9: auto-split any doc that exceeds 600 lines
 
 **Contract types:**
 
@@ -467,6 +494,31 @@ After monkeys run, a **contract-based completeness gate** validates every domain
 Import-Module ./shared/CompletenessGate.psm1
 Invoke-CompletenessGate -RepoPath "C:\your-repo"
 ```
+
+### Retrofit — Upgrade Existing Repos
+
+`Run-Retrofit.ps1` upgrades repos that were documented before DAG-completeness was built:
+
+```powershell
+# Dry run — see what would change
+.\Run-Retrofit.ps1 -RepoPath "C:\your-repo" -DryRun
+
+# Apply all 5 passes with auto-fix
+.\Run-Retrofit.ps1 -RepoPath "C:\your-repo" -AutoFix -Commit
+
+# Run a single pass
+.\Run-Retrofit.ps1 -RepoPath "C:\your-repo" -Only pointers -AutoFix
+```
+
+**5 retrofit passes:**
+
+| Pass | What it does |
+|------|-------------|
+| **1. Layer Tags** | Adds `<!-- layer: L0–L3 -->` to every doc |
+| **2. Navigation Guide** | Injects quick-start guide into Discovery_Manifest |
+| **3. Registry Rebuild** | Rebuilds `doc_registry.md` deterministically |
+| **4. Code Pointers** | Audits `## 6. Key Source Files` refs, auto-fixes dead links |
+| **5. Doc Sizing** | Flags oversized docs (WARN/BLOCK) |
 
 ### Doc Standard (Unified Across All Components)
 

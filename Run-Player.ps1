@@ -89,6 +89,8 @@ Import-Module (Join-Path $PSScriptRoot "shared\MonkeyCommon.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "shared\GitProviders.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "shared\DocHealthScorer.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "shared\CompletenessGate.psm1") -Force
+Import-Module "$PSScriptRoot\shared\DocRegistry.psm1" -Force
+Import-Module "$PSScriptRoot\shared\DocLayers.psm1" -Force
 
 # ── Playbook skip detection ────────────────────────────────────────
 
@@ -447,6 +449,39 @@ foreach ($monkey in $config.OrderedMonkeys) {
     }
 }
 Save-RunCheckpoint -OutputRoot $outputRoot -CheckpointData $runCheckpoint
+
+# ── Significance scoring (skip trivial changes) ──────────────────
+if ($Incremental) {
+    Write-Step "Scoring change significance..." "INFO"
+    try {
+        Push-Location $workDir
+        $sinceRef = if ($Since) { $Since } else { 'HEAD~1' }
+        $changedFileList = @(& git --no-pager diff --name-only $sinceRef 2>&1 | Where-Object { $_ -and $_ -is [string] })
+        Pop-Location
+
+        if ($changedFileList.Count -gt 0) {
+            $manifestPath = Get-ChildItem $workDir -Filter "Discovery_Manifest.md" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            $docsRootPath = if ($manifestPath) { $manifestPath.DirectoryName } else { $null }
+
+            if ($manifestPath -and $docsRootPath) {
+                $impactResult = Get-DocImpactScore -ChangedFiles $changedFileList -ManifestPath $manifestPath.FullName -DocsRoot $docsRootPath
+                Write-Step "Impact: $($impactResult.SignificantFiles) significant, $($impactResult.TrivialFiles) trivial out of $($impactResult.TotalChangedFiles) files" "INFO"
+                Write-Step "Docs to re-run: $($impactResult.RerunDocs.Count), skippable: $($impactResult.SkippedDocs.Count)" "OK"
+
+                # Store in run checkpoint for monkey filtering
+                if ($runCheckpoint) {
+                    $runCheckpoint['significanceResult'] = $impactResult
+                }
+            } else {
+                Write-Step "No manifest for significance scoring — running all monkeys" "WARN"
+            }
+        } else {
+            Write-Step "No changed files for significance scoring" "SKIP"
+        }
+    } catch {
+        Write-Step "Significance scoring failed: $_" "WARN"
+    }
+}
 
 # ── Parallel Question Generation ──────────────────────────────────
 # When -ParallelGen is set, run question gen for all prompt-mode monkeys
@@ -1387,6 +1422,53 @@ if ($cleanupMadeChanges) {
 } # end needsCleanup else block
 
 Write-Step "Cleanup complete: $($cleanupStats.Deduped) deduped, $($cleanupStats.Orphaned) orphans, indexes=$(if ($cleanupStats.IndexRebuilt) {'rebuilt'} else {'skipped'}), reverted=$($cleanupStats.Reverted), skipped=$($cleanupStats.Skipped)" "INFO"
+
+# ── Registry rebuild (deterministic) ──
+Write-Step "Rebuilding doc registry (deterministic)..." "INFO"
+try {
+    $docsRoot = $null
+    # Auto-detect docs root by finding Discovery_Manifest.md
+    $manifestFile = Get-ChildItem $workDir -Filter "Discovery_Manifest.md" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($manifestFile) {
+        $docsRoot = $manifestFile.DirectoryName
+    }
+
+    if ($docsRoot) {
+        $changeLogPath = Join-Path $workDir ".monkey-output" ".doc-changes.log"
+        $registryResult = Build-DocRegistry -RepoPath $workDir -DocsRoot $docsRoot -ChangeLogPath $changeLogPath
+        Write-Step "Registry rebuilt: $($registryResult.TotalControllers) controllers, $($registryResult.CoveragePct)% coverage" "OK"
+
+        # Clear change log after successful rebuild
+        if (Test-Path $changeLogPath) {
+            Clear-ChangeLog -ChangeLogPath $changeLogPath
+            Write-Step "Change log cleared" "OK"
+        }
+
+        # ── Auto-split oversized docs ──
+        $wfDir = Join-Path $docsRoot "workflows"
+        if (Test-Path $wfDir) {
+            $splitCount = 0
+            $wfDocs = @(Get-ChildItem $wfDir -Filter "*.md" -File | Where-Object { $_.Name -notmatch '_deep_dive\.md$' })
+            foreach ($wfDoc in $wfDocs) {
+                $sizeResult = Test-DocSize -DocPath $wfDoc.FullName -DocType 'workflow'
+                if ($sizeResult.Status -eq 'BLOCK') {
+                    $splitResult = Split-OversizedDoc -DocPath $wfDoc.FullName
+                    if ($splitResult.Split) {
+                        $splitCount++
+                        Write-Step "Split $($wfDoc.Name): $($splitResult.OriginalLines) → $($splitResult.NewParentLines) lines + $([System.IO.Path]::GetFileName($splitResult.ChildPath))" "OK"
+                    }
+                }
+            }
+            if ($splitCount -gt 0) {
+                Write-Step "Auto-split $splitCount oversized workflow doc(s)" "OK"
+            }
+        }
+    } else {
+        Write-Step "No Discovery_Manifest.md found — skipping registry rebuild" "SKIP"
+    }
+} catch {
+    Write-Step "Registry rebuild failed: $_" "WARN"
+}
 
 # ══════════════════════════════════════════════════════════════════
 #  PHASE 6: UNIFIED REPORT

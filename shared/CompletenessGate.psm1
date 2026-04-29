@@ -600,6 +600,428 @@ function Invoke-CompletenessGate {
 }
 
 # ═══════════════════════════════════════════════════════════════
+# CODE POINTER VALIDATION — Verify file refs in markdown docs
+# ═══════════════════════════════════════════════════════════════
+
+function Test-CodePointers {
+    <#
+    .SYNOPSIS
+        Extracts file path references from a markdown doc and verifies they resolve on disk.
+    .PARAMETER DocPath
+        Path to the markdown document.
+    .PARAMETER RepoPath
+        Path to the repository root.
+    .PARAMETER DeadRefThreshold
+        Maximum allowed dead reference rate (0.0–1.0). Default 0.20.
+    .OUTPUTS
+        Hashtable with TotalRefs, ResolvedRefs, DeadRefs, DeadRefPaths, DeadRefRate, Pass.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$DocPath,
+        [Parameter(Mandatory)][string]$RepoPath,
+        [double]$DeadRefThreshold = 0.20
+    )
+
+    $result = @{
+        DocPath      = $DocPath
+        TotalRefs    = 0
+        ResolvedRefs = 0
+        DeadRefs     = 0
+        DeadRefPaths = @()
+        DeadRefRate  = 0.0
+        Pass         = $true
+    }
+
+    if (-not (Test-Path $DocPath)) { return $result }
+
+    $content = Get-Content $DocPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    if (-not $content) { return $result }
+
+    # ── Collect all file path references ──
+    $allRefs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    # Pattern 1: Backtick paths — `path/to/file.ext`
+    $backtickMatches = [regex]::Matches($content, '`([A-Za-z][\w\\\/\.\-]+\.\w+)`')
+    foreach ($m in $backtickMatches) { [void]$allRefs.Add($m.Groups[1].Value) }
+
+    # Pattern 2: Section 6 table entries — | path/file.ext | ClassName | Purpose |
+    $tableMatches = [regex]::Matches($content, '(?m)^\|\s*([A-Za-z][\w\\\/\.\-]+\.\w+)\s*\|')
+    foreach ($m in $tableMatches) { [void]$allRefs.Add($m.Groups[1].Value) }
+
+    # Pattern 3: Bare paths with src/, lib/, app/, cmd/ prefix
+    $bareMatches = [regex]::Matches($content, '(?<![`\[(/])(?:src|lib|app|cmd)/[\w/\.\-]+\.\w+')
+    foreach ($m in $bareMatches) { [void]$allRefs.Add($m.Value) }
+
+    # ── Filter out non-file refs ──
+    $skipPattern = '^https?://|^#|\.(?:png|jpg|jpeg|svg|gif)$'
+    $filteredRefs = @($allRefs | Where-Object { $_ -notmatch $skipPattern })
+
+    $result.TotalRefs = $filteredRefs.Count
+    if ($filteredRefs.Count -eq 0) { return $result }
+
+    # ── Resolve each ref ──
+    $deadPaths = @()
+    foreach ($ref in $filteredRefs) {
+        $normalizedRef = $ref -replace '/', '\'
+        $found = $false
+
+        # a) Exact path
+        $exactPath = Join-Path $RepoPath $normalizedRef
+        if (Test-Path $exactPath) { $found = $true }
+
+        # b) Under src/
+        if (-not $found) {
+            $srcPath = Join-Path $RepoPath "src" $normalizedRef
+            if (Test-Path $srcPath) { $found = $true }
+        }
+
+        # c) Wildcard / glob
+        if (-not $found -and $ref -match '\*') { $found = $true }
+
+        if (-not $found) { $deadPaths += $ref }
+    }
+
+    $result.DeadRefs     = $deadPaths.Count
+    $result.DeadRefPaths = $deadPaths
+    $result.ResolvedRefs = $filteredRefs.Count - $deadPaths.Count
+    $result.DeadRefRate  = if ($filteredRefs.Count -gt 0) { [double]$deadPaths.Count / $filteredRefs.Count } else { 0.0 }
+    $result.Pass         = $result.DeadRefRate -le $DeadRefThreshold
+
+    return $result
+}
+
+# ═══════════════════════════════════════════════════════════════
+# DOC SIZE ENFORCEMENT — Line count limits per doc type
+# ═══════════════════════════════════════════════════════════════
+
+$script:DocSizeLimits = @{
+    'workflow'  = @{ Warn = 400; Block = 600 }
+    'reference' = @{ Warn = 200; Block = 400 }
+    'adr'       = @{ Warn = 150; Block = 300 }
+    'general'   = @{ Warn = 300; Block = 500 }
+}
+
+$script:ChildLimits = @{ Warn = 250; Block = 400 }
+
+function Test-DocSize {
+    <#
+    .SYNOPSIS
+        Checks doc line counts against per-type limits.
+    .PARAMETER DocPath
+        Path to the markdown document.
+    .PARAMETER DocType
+        One of: workflow, reference, adr, general.
+    .PARAMETER WarnLimit
+        Override warn limit.
+    .PARAMETER BlockLimit
+        Override block limit.
+    .OUTPUTS
+        Hashtable with LineCount, DocType, WarnLimit, BlockLimit, HasOverride, IsChild, Status.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$DocPath,
+        [Parameter(Mandatory)][ValidateSet('workflow','reference','adr','general')][string]$DocType,
+        [int]$WarnLimit,
+        [int]$BlockLimit
+    )
+
+    $lines = @(Get-Content $DocPath -Encoding UTF8 -ErrorAction SilentlyContinue)
+    $lineCount = $lines.Count
+    $content = $lines -join "`n"
+
+    # Determine base limits from doc type
+    $baseLimits = $script:DocSizeLimits[$DocType]
+    $effectiveWarn  = $baseLimits.Warn
+    $effectiveBlock = $baseLimits.Block
+    $hasOverride = $false
+    $isChild = $false
+
+    # Check for frontmatter override: <!-- max-lines: N -->
+    if ($content -match '<!--\s*max-lines:\s*(\d+)\s*-->') {
+        $overrideBlock = [int]$Matches[1]
+        $effectiveBlock = $overrideBlock
+        $effectiveWarn  = [Math]::Floor($overrideBlock * 0.7)
+        $hasOverride = $true
+    }
+
+    # Check for parent/child: <!-- parent: X -->
+    if ($content -match '<!--\s*parent:\s*.+\s*-->') {
+        $isChild = $true
+        if (-not $hasOverride) {
+            $effectiveWarn  = $script:ChildLimits.Warn
+            $effectiveBlock = $script:ChildLimits.Block
+        }
+    }
+
+    # Explicit parameter overrides take highest priority
+    if ($PSBoundParameters.ContainsKey('WarnLimit'))  { $effectiveWarn  = $WarnLimit }
+    if ($PSBoundParameters.ContainsKey('BlockLimit')) { $effectiveBlock = $BlockLimit }
+
+    # Determine status
+    $status = if ($lineCount -ge $effectiveBlock) { 'BLOCK' }
+              elseif ($lineCount -ge $effectiveWarn) { 'WARN' }
+              else { 'OK' }
+
+    return @{
+        DocPath     = $DocPath
+        LineCount   = $lineCount
+        DocType     = $DocType
+        WarnLimit   = $effectiveWarn
+        BlockLimit  = $effectiveBlock
+        HasOverride = $hasOverride
+        IsChild     = $isChild
+        Status      = $status
+    }
+}
+
+function Split-OversizedDoc {
+    <#
+    .SYNOPSIS
+        Splits an oversized workflow doc by extracting §11+ and duplicate sections
+        into a companion *_deep_dive.md file.
+    .PARAMETER DocPath
+        Path to the oversized markdown document.
+    .PARAMETER DryRun
+        Preview changes without writing files.
+    .OUTPUTS
+        Hashtable with Split (bool), ParentPath, ChildPath, ExtractedCount,
+        OriginalLines, NewParentLines, ChildLines.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$DocPath,
+        [switch]$DryRun
+    )
+
+    $lines = @(Get-Content $DocPath -Encoding UTF8)
+    $originalCount = $lines.Count
+
+    # Parse sections (## headings)
+    $sections = @()
+    $currentStart = $null
+    $currentHeading = $null
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^## ') {
+            if ($null -ne $currentStart) {
+                $sections += @{
+                    Start   = $currentStart
+                    End     = $i - 1
+                    Heading = $currentHeading
+                    Lines   = $lines[$currentStart..($i - 1)]
+                }
+            }
+            $currentStart = $i
+            $currentHeading = $lines[$i]
+        }
+    }
+    if ($null -ne $currentStart) {
+        $sections += @{
+            Start   = $currentStart
+            End     = $lines.Count - 1
+            Heading = $currentHeading
+            Lines   = $lines[$currentStart..($lines.Count - 1)]
+        }
+    }
+
+    # Classify: core (§0-§10 first occurrence) vs extra (§11+, sub-sections, duplicates)
+    $coreSections = @()
+    $extraSections = @()
+    $seenNumbers = @{}
+
+    foreach ($section in $sections) {
+        $num = -1
+        if ($section.Heading -match '^## (\d+)[a-f]?\.?\s') { $num = [int]$Matches[1] }
+        elseif ($section.Heading -match '^## Related') { $num = 0 }
+
+        $isExtra = $false
+        if ($num -ge 11) { $isExtra = $true }
+        elseif ($section.Heading -match '^## \d+[a-f][\.\s]' -or $section.Heading -match '^## 5[1-9]') { $isExtra = $true }
+        elseif ($num -ge 0 -and $seenNumbers.ContainsKey($num)) { $isExtra = $true }
+
+        if (-not $isExtra) {
+            $coreSections += $section
+            if ($num -ge 0) { $seenNumbers[$num] = $true }
+        } else {
+            $extraSections += $section
+        }
+    }
+
+    if ($extraSections.Count -eq 0) {
+        return @{ Split = $false; Reason = 'No extra sections to extract' }
+    }
+
+    # Build file paths
+    $dir = Split-Path $DocPath
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($DocPath)
+    $parentFileName = [System.IO.Path]::GetFileName($DocPath)
+    $childName = "${baseName}_deep_dive.md"
+    $childPath = Join-Path $dir $childName
+
+    # Build child doc
+    $childLines = @(
+        "<!-- layer: L3 | role: workflow-${baseName}-deep-dive -->"
+        "<!-- parent: $parentFileName -->"
+        ""
+        "# $baseName - Deep Dive Sections"
+        ""
+        "> Extended sections extracted from [$parentFileName](./$parentFileName)."
+        ""
+    )
+    $movedHeadings = @()
+    foreach ($extra in $extraSections) {
+        $childLines += $extra.Lines
+        $childLines += ""
+        $clean = ($extra.Heading -replace '<!--.*?-->', '').Trim()
+        $movedHeadings += "- $clean"
+    }
+
+    # Rebuild parent: preamble + core + stub
+    $firstHeading = ($sections | Select-Object -First 1).Start
+    $preamble = if ($firstHeading -gt 0) { $lines[0..($firstHeading - 1)] } else { @() }
+
+    $newParentLines = @()
+    $newParentLines += $preamble
+    foreach ($core in $coreSections) { $newParentLines += $core.Lines }
+    $newParentLines += @(
+        ""
+        "---"
+        ""
+        "## Extended Sections"
+        ""
+        "Additional deep-dive content has been moved to"
+        "[$childName](./$childName) to keep this doc within the standard section structure."
+        ""
+        "Topics covered in the deep-dive doc:"
+    )
+    $newParentLines += $movedHeadings
+    $newParentLines += ""
+
+    if (-not $DryRun) {
+        Set-Content -Path $childPath -Value ($childLines -join "`n") -NoNewline -Encoding UTF8
+        Set-Content -Path $DocPath -Value ($newParentLines -join "`n") -NoNewline -Encoding UTF8
+    }
+
+    return @{
+        Split          = $true
+        ParentPath     = $DocPath
+        ChildPath      = $childPath
+        ExtractedCount = $extraSections.Count
+        OriginalLines  = $originalCount
+        NewParentLines = $newParentLines.Count
+        ChildLines     = $childLines.Count
+    }
+}
+
+function Test-ParentChildCompleteness {
+    <#
+    .SYNOPSIS
+        For parent docs with child docs, aggregates section coverage across the family.
+    .PARAMETER ParentDocPath
+        Path to the parent doc.
+    .PARAMETER RepoPath
+        Repository root.
+    .PARAMETER RequiredSections
+        Array of section patterns. Defaults to PrimaryWorkflowSections.
+    .OUTPUTS
+        Hashtable with ParentDoc, ChildDocs, section coverage, MissingSections, Pass.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ParentDocPath,
+        [Parameter(Mandatory)][string]$RepoPath,
+        [array]$RequiredSections
+    )
+
+    if (-not $RequiredSections -or $RequiredSections.Count -eq 0) {
+        $RequiredSections = $script:PrimaryWorkflowSections
+    }
+
+    $result = @{
+        ParentDoc       = $ParentDocPath
+        ChildDocs       = @()
+        ParentSections  = @()
+        ChildSections   = @{}
+        UnionSections   = @()
+        TotalRequired   = $RequiredSections.Count
+        TotalPresent    = 0
+        MissingSections = @()
+        Pass            = $false
+    }
+
+    if (-not (Test-Path $ParentDocPath)) { return $result }
+
+    $parentContent = Get-Content $ParentDocPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    if (-not $parentContent) { return $result }
+
+    # ── Find sections present in parent ──
+    $parentFound = @()
+    foreach ($section in $RequiredSections) {
+        if ($parentContent -match $section.Pattern) {
+            $parentFound += $section.Name
+        }
+    }
+    $result.ParentSections = $parentFound
+
+    # ── Extract child doc paths from "## Child Docs" section ──
+    $childPaths = @()
+    if ($parentContent -match '(?ms)##\s*Child\s*Docs(.+?)(?=\n##\s|\z)') {
+        $childSection = $Matches[1]
+        # Match table rows: | path/to/child.md | ... | or markdown links [text](path.md)
+        $childTableMatches = [regex]::Matches($childSection, '(?m)^\|\s*`?([^\|`]+\.md)`?\s*\|')
+        foreach ($m in $childTableMatches) { $childPaths += $m.Groups[1].Value.Trim() }
+        # Also match markdown links
+        $childLinkMatches = [regex]::Matches($childSection, '\[.*?\]\(([^\)]+\.md)\)')
+        foreach ($m in $childLinkMatches) { $childPaths += $m.Groups[1].Value.Trim() }
+    }
+
+    $resolvedChildren = [System.Collections.Generic.List[string]]::new()
+    $childSectionsMap = @{}
+
+    foreach ($childRelPath in $childPaths) {
+        $childFullPath = Join-Path (Split-Path $ParentDocPath -Parent) $childRelPath
+        if (-not (Test-Path $childFullPath)) {
+            # Try from repo root
+            $childFullPath = Join-Path $RepoPath $childRelPath
+        }
+        if (-not (Test-Path $childFullPath)) { continue }
+
+        $resolvedChildren.Add($childFullPath)
+        $childContent = Get-Content $childFullPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        if (-not $childContent) { continue }
+
+        $childFound = @()
+        foreach ($section in $RequiredSections) {
+            if ($childContent -match $section.Pattern) {
+                $childFound += $section.Name
+            }
+        }
+        $childSectionsMap[$childFullPath] = $childFound
+    }
+
+    $result.ChildDocs = @($resolvedChildren)
+    $result.ChildSections = $childSectionsMap
+
+    # ── Build union of all found sections ──
+    $unionSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($s in $parentFound) { [void]$unionSet.Add($s) }
+    foreach ($childEntry in $childSectionsMap.GetEnumerator()) {
+        foreach ($s in $childEntry.Value) { [void]$unionSet.Add($s) }
+    }
+    $result.UnionSections = @($unionSet)
+
+    # ── Determine missing sections ──
+    $missingSections = @()
+    foreach ($section in $RequiredSections) {
+        if (-not $unionSet.Contains($section.Name)) {
+            $missingSections += $section.Name
+        }
+    }
+    $result.MissingSections = $missingSections
+    $result.TotalPresent   = $unionSet.Count
+    $result.Pass           = ($missingSections.Count -eq 0)
+
+    return $result
+}
+
+# ═══════════════════════════════════════════════════════════════
 # EXPORTS
 # ═══════════════════════════════════════════════════════════════
 
@@ -609,5 +1031,9 @@ Export-ModuleMember -Function @(
     'Get-RemediationQueue',
     'Show-CompletenessReport',
     'Invoke-CompletenessGate',
-    'Test-DocReferences'
+    'Test-DocReferences',
+    'Test-CodePointers',
+    'Test-DocSize',
+    'Split-OversizedDoc',
+    'Test-ParentChildCompleteness'
 )
